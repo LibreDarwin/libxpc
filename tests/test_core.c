@@ -24,6 +24,10 @@ int main(void) {
     assert(xpc_dictionary_get_int64(copy, "answer") == 42);
     assert(strcmp(xpc_dictionary_get_string(copy, "text"), "hello") == 0);
     free(wire);
+    xpc_pipe_t pipe = xpc_pipe_create_from_port(MACH_PORT_NULL, 0);
+    assert(pipe);
+    assert(xpc_pipe_simpleroutine(pipe, d, NULL) != KERN_SUCCESS);
+    assert(xpc_pipe_invalidate(pipe) == KERN_SUCCESS);
     xpc_release(copy); xpc_release(d);
     return 0;
 }

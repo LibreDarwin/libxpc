@@ -72,10 +72,11 @@ The implementation recognizes the three observed message IDs:
 
 ## Pipe boundary
 
-`xpc_pipe_create_from_port()` and invalidation are present. The core milestone
-does not yet implement endpoint discovery, connection lifecycle, or the Mach
-send/receive loop; `xpc_pipe_simpleroutine()` and `xpc_pipe_routine()` return
-`KERN_NOT_SUPPORTED` until that transport layer is added.
+`xpc_pipe_create_from_port()` and invalidation are present. Simpleroutine now
+performs a Mach send, while routine allocates a receive right, sends with a
+`MACH_SEND_MSG | MACH_RCV_MSG` transaction, validates reply ID `0x20000000`,
+and deserializes the reply. Endpoint discovery and connection lifecycle remain
+outside this milestone.
 
 ## Verification
 

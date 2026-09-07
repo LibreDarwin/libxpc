@@ -201,11 +201,10 @@ xpc_wire_serialize(xpc_object_t object, uint32_t msg_id, size_t *out_len)
     }
     w.len = 0;
 
-    /* Header (LE): bits=0x13 similaroutine / 0x1315 routine w/ reply
-     * handled by the pipe layer; here the caller already folded the
-     * right bits into msgh_bits via msg_id.  We keep the header
-     * minimal: bits 0 (pipe layer patches it), size, id. */
-    wbuf_u32(&w, 0x13150000);               /* placeholder msgh_bits */
+    /* Header (LE): the captured messages use 0x130013 for simpleroutine
+     * and 0x131513 for routine. The pipe layer patches the actual port
+     * dispositions before sending. */
+    wbuf_u32(&w, msg_id == XPC_PIPE_ID_ROUTINE ? 0x00131513 : 0x00130013);
     wbuf_u32(&w, (uint32_t)total);          /* msgh_size */
     wbuf_u32(&w, 0);                        /* msgh_remote_port */
     wbuf_u32(&w, 0);                        /* msgh_local_port */
