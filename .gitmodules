@@ -1,0 +1,3 @@
+[submodule "src/apple/libinfo"]
+	path = src/apple/libinfo
+	url = https://github.com/apple-oss-distributions/Libinfo
