@@ -4,3 +4,6 @@
 [submodule "src/apple/notify"]
 	path = src/apple/notify
 	url = https://github.com/apple-oss-distributions/notify
+[submodule "src/apple/launchd"]
+	path = src/apple/launchd
+	url = https://github.com/apple-oss-distributions/launchd
