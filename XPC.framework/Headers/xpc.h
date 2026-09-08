@@ -1,4 +1,35 @@
 /*
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Copyright (C) 2026 Sunneva N. Mariu
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/*
  * xpc.h — public API for the reimplemented XPC framework.
  *
  * Drop-in compatible subset of Apple's libxpc public interface,
@@ -33,7 +64,6 @@ extern "C" {
  */
 typedef struct _xpc_object_s *xpc_object_t;
 
-typedef struct _xpc_connection_s *xpc_connection_t;
 
 /*!
  * @typedef xpc_type_t
@@ -80,6 +110,50 @@ extern const struct _xpc_type_s _xpc_type_endpoint;
 extern const struct _xpc_type_s _xpc_type_activity;
 extern const struct _xpc_type_s _xpc_type_session;
 extern const struct _xpc_type_s _xpc_type_listener;
+
+#pragma mark - Connection
+
+xpc_object_t xpc_connection_create_from_endpoint(xpc_object_t endpoint);
+xpc_object_t xpc_connection_create(mach_port_t port);
+mach_port_t xpc_connection_get_port(xpc_object_t connection);
+void xpc_connection_set_incoming_message_handler(xpc_object_t connection,
+    xpc_handler_t handler);
+void xpc_connection_resume(xpc_object_t connection);
+void xpc_connection_suspend(xpc_object_t connection);
+void xpc_connection_cancel(xpc_object_t connection);
+
+#pragma mark - Endpoint
+
+xpc_object_t xpc_endpoint_create(mach_port_t port);
+mach_port_t xpc_endpoint_get_port(xpc_object_t endpoint);
+xpc_object_t xpc_endpoint_copy_listener_port(xpc_object_t endpoint);
+
+#pragma mark - Activity
+
+xpc_object_t xpc_activity_create(xpc_object_t connection);
+xpc_object_t xpc_activity_create_from_endpoint(xpc_object_t endpoint);
+void xpc_activity_resume(xpc_object_t activity);
+void xpc_activity_suspend(xpc_object_t activity);
+void xpc_activity_cancel(xpc_object_t activity);
+
+#pragma mark - Session
+
+xpc_object_t xpc_session_create(xpc_object_t endpoint);
+void xpc_session_set_incoming_message_handler(xpc_object_t session,
+    xpc_handler_t handler);
+void xpc_session_resume(xpc_object_t session);
+void xpc_session_suspend(xpc_object_t session);
+void xpc_session_cancel(xpc_object_t session);
+
+#pragma mark - Listener
+
+xpc_object_t xpc_listener_create(mach_port_t port);
+xpc_object_t xpc_listener_create_anonymous(void);
+void xpc_listener_set_incoming_session_handler(xpc_object_t listener,
+    xpc_handler_t handler);
+void xpc_listener_resume(xpc_object_t listener);
+void xpc_listener_suspend(xpc_object_t listener);
+void xpc_listener_cancel(xpc_object_t listener);
 
 #pragma mark - Null
 
