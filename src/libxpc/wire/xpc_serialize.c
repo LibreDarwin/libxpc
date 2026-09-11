@@ -98,9 +98,38 @@ wbuf_pad4(xpc_wbuf_t *w)
     for (size_t i = 0; i < p; i++) wbuf_write(w, "", 1);
 }
 
+/*
+ * Port table: every mach-send value encountered during serialization is
+ * appended here and referenced on the wire by its index.  A non-empty
+ * table makes the caller emit a complex message carrying an OOL_PORTS
+ * descriptor with the table as the port-name array.
+ *
+ * Port names are copied into the table; the rights themselves are only
+ * referenced, never consumed (the descriptor disposition is COPY_SEND).
+ */
+typedef struct {
+    mach_port_t *ports;
+    uint32_t nports;
+    uint32_t cap;
+} xpc_porttab_t;
+
+static bool
+porttab_add(xpc_porttab_t *pt, mach_port_t port)
+{
+    if (pt->nports >= pt->cap) {
+        uint32_t newcap = pt->cap ? pt->cap * 2 : 8;
+        mach_port_t *np = realloc(pt->ports, newcap * sizeof(mach_port_t));
+        if (!np) return false;
+        pt->ports = np;
+        pt->cap = newcap;
+    }
+    pt->ports[pt->nports++] = port;
+    return true;
+}
+
 /* Serialize a single value (without the enclosing key). */
 static void
-xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj)
+xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj, xpc_porttab_t *pt)
 {
     switch (obj->isa->kind) {
     case XPC_KIND_NULL:
@@ -149,11 +178,19 @@ xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj)
         wbuf_u32(w, XPC_WIRE_UUID);
         wbuf_write(w, XPC_CAST(xpc_uuid_t, obj)->uuid, 16);
         break;
+    case XPC_KIND_MACH_SEND: {
+        xpc_mach_send_t *m = XPC_CAST(xpc_mach_send_t, obj);
+        uint32_t idx = pt->nports;
+        (void)porttab_add(pt, m->port);
+        wbuf_u32(w, XPC_WIRE_MACH_SEND);
+        wbuf_u64(w, idx);
+        break;
+    }
     case XPC_KIND_ARRAY: {
         xpc_array_t *a = XPC_CAST(xpc_array_t, obj);
         xpc_wbuf_t body = {0};
         wbuf_u32(&body, (uint32_t)a->count);
-        for (size_t i = 0; i < a->count; i++) xpc_serialize_value(&body, a->items[i]);
+        for (size_t i = 0; i < a->count; i++) xpc_serialize_value(&body, a->items[i], pt);
         wbuf_u32(w, XPC_WIRE_ARRAY);
         wbuf_u32(w, (uint32_t)body.len);
         wbuf_write(w, body.base, body.len);
@@ -168,7 +205,7 @@ xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj)
             size_t klen = strlen(d->keys[i]);
             wbuf_write(&body, d->keys[i], klen + 1);
             wbuf_pad4(&body);
-            xpc_serialize_value(&body, d->values[i]);
+            xpc_serialize_value(&body, d->values[i], pt);
         }
         wbuf_u32(w, XPC_WIRE_DICT);
         wbuf_u32(w, (uint32_t)body.len);
@@ -201,10 +238,12 @@ xpc_wire_serialize(xpc_object_t object, uint32_t msg_id, size_t *out_len)
     }
 
     xpc_wbuf_t w = {0};
+    xpc_porttab_t pt = {0};
 
     /* We need body_len = total body bytes INCLUDING the count word.
      * Serialize the body into a scratch buffer first, then stitch
-     * the envelope around it. */
+     * the envelope around it.  Any mach-send values encountered land
+     * in pt and are referenced by wire index. */
     xpc_wbuf_t b = {0};
     if (object->isa == &_xpc_type_dictionary) {
         xpc_dictionary_t *d = XPC_CAST(xpc_dictionary_t, object);
@@ -213,14 +252,14 @@ xpc_wire_serialize(xpc_object_t object, uint32_t msg_id, size_t *out_len)
             size_t klen = strlen(d->keys[i]);
             wbuf_write(&b, d->keys[i], klen + 1);   /* incl. NUL */
             wbuf_pad4(&b);
-            xpc_serialize_value(&b, d->values[i]);
+            xpc_serialize_value(&b, d->values[i], &pt);
         }
         wbuf_pad4(&b);
     } else {
         xpc_array_t *a = XPC_CAST(xpc_array_t, object);
         wbuf_u32(&b, (uint32_t)a->count);
         for (size_t i = 0; i < a->count; i++) {
-            xpc_serialize_value(&b, a->items[i]);
+            xpc_serialize_value(&b, a->items[i], &pt);
         }
         wbuf_pad4(&b);
     }
@@ -231,23 +270,67 @@ xpc_wire_serialize(xpc_object_t object, uint32_t msg_id, size_t *out_len)
      * from the first envelope byte (offset 24). */
     uint32_t flags = XPC_WIRE_FLAGS_DICT;
     uint32_t body_len = (uint32_t)b.len;
-    size_t total = 24 + 16 + body_len;
+
+    /*
+     * Complex layout when the object graph carries send rights:
+     *   header (24) + body (4) + OOL_PORTS descriptor (16)
+     *   + ports array (4 * nports, mach_port_t is 32-bit on arm64)
+     *   + envelope (16) + body.
+     * The descriptor's address points at the inline ports array; the
+     * kernel copies the names (PHYSICAL_COPY), translates each against
+     * our port table, and rebuilds the array in the receiver's space.
+     */
+    const size_t nports = pt.nports;
+    const size_t ports_bytes = (size_t)nports * sizeof(mach_port_t);
+    const size_t complex_offset = 24 + 4 + 16 + ports_bytes;
+    const size_t total = (nports ? complex_offset : 24) + 16 + body_len;
 
     if (!wbuf_reserve(&w, total)) {
         free(b.base);
+        free(pt.ports);
         return NULL;
     }
     w.len = 0;
 
-    /* Header (LE): the captured messages use 0x130013 for simpleroutine
-     * and 0x131513 for routine. The pipe layer patches the actual port
-     * dispositions before sending. */
-    wbuf_u32(&w, msg_id == XPC_PIPE_ID_ROUTINE ? 0x00131513 : 0x00130013);
+    /* Header (LE): the captured messages use 0x00130013 for simpleroutine
+     * and 0x00131513 for routine (0x13 = COPY_SEND remote, 0x15 = MAKE
+     * SEND_ONCE local). The pipe layer patches the actual port
+     * dispositions before sending; when ports ride along, the COMPLEX
+     * bit (0x80000000) is set here and preserved by the pipe. Routine
+     * ids carry the routine number in the low 16 bits (0x40000000 |
+     * routine), so classify on the routine bit, not exact equality. */
+    uint32_t base_bits = (msg_id & XPC_PIPE_ID_ROUTINE) ? 0x00131513 : 0x00130013;
+    wbuf_u32(&w, nports ? (base_bits | MACH_MSGH_BITS_COMPLEX) : base_bits);
     wbuf_u32(&w, (uint32_t)total);          /* msgh_size */
     wbuf_u32(&w, 0);                        /* msgh_remote_port */
     wbuf_u32(&w, 0);                        /* msgh_local_port */
     wbuf_u32(&w, 0);                        /* msgh_voucher_port */
     wbuf_u32(&w, msg_id);                   /* msgh_id */
+
+    if (nports) {
+        /* msgh_body_t: one descriptor. */
+        wbuf_u32(&w, 1);
+
+        /* mach_msg_ool_ports_descriptor_t (16B on LP64):
+         * address(8) + deallocate/copy/disposition/type(1 each) + count(4).
+         * address points at the ports array below (physical copy; safe
+         * because the whole message buffer is freed right after send). */
+        mach_msg_ool_ports_descriptor_t desc;
+        memset(&desc, 0, sizeof desc);
+        desc.address = (void *)(w.base + w.len + 16);
+        desc.deallocate = 0;
+        desc.copy = MACH_MSG_PHYSICAL_COPY;         /* 0 */
+        desc.disposition = MACH_MSG_TYPE_COPY_SEND; /* 0x13 */
+        desc.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;  /* 2 */
+        desc.count = (mach_msg_size_t)nports;
+        wbuf_write(&w, &desc, sizeof desc);
+
+        /* Inline port-name array (the descriptor references it). */
+        wbuf_write(&w, pt.ports, ports_bytes);
+    } else {
+        /* msgh_body_t absent for simple messages. */
+    }
+    free(pt.ports);
 
     /* Envelope. */
     wbuf_write(&w, XPC_WIRE_MAGIC, 4);

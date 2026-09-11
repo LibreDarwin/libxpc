@@ -48,6 +48,7 @@ const struct _xpc_type_s _xpc_type_date       = { "date",       XPC_KIND_DATE };
 const struct _xpc_type_s _xpc_type_data       = { "data",       XPC_KIND_DATA };
 const struct _xpc_type_s _xpc_type_string     = { "string",     XPC_KIND_STRING };
 const struct _xpc_type_s _xpc_type_uuid       = { "uuid",       XPC_KIND_UUID };
+const struct _xpc_type_s _xpc_type_mach_send  = { "mach-send",  XPC_KIND_MACH_SEND };
 const struct _xpc_type_s _xpc_type_array      = { "array",      XPC_KIND_ARRAY };
 const struct _xpc_type_s _xpc_type_dictionary = { "dictionary", XPC_KIND_DICTIONARY };
 const struct _xpc_type_s _xpc_type_error      = { "error",      XPC_KIND_ERROR };

@@ -123,6 +123,30 @@ xpc_dictionary_set_value(xpc_object_t dict, const char *key, xpc_object_t value)
     d->count++;
 }
 
+void
+xpc_dictionary_set_bool(xpc_object_t dict, const char *key, bool value)
+{
+    xpc_object_t obj = xpc_bool_create(value);
+    xpc_dictionary_set_value(dict, key, obj);
+    xpc_release(obj);
+}
+
+void
+xpc_dictionary_set_int64(xpc_object_t dict, const char *key, int64_t value)
+{
+    xpc_object_t obj = xpc_int64_create(value);
+    xpc_dictionary_set_value(dict, key, obj);
+    xpc_release(obj);
+}
+
+void
+xpc_dictionary_set_uint64(xpc_object_t dict, const char *key, uint64_t value)
+{
+    xpc_object_t obj = xpc_uint64_create(value);
+    xpc_dictionary_set_value(dict, key, obj);
+    xpc_release(obj);
+}
+
 xpc_object_t
 xpc_dictionary_get_value(xpc_object_t dict, const char *key)
 {

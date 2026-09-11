@@ -33,6 +33,12 @@
 
 typedef struct { const uint8_t *p, *end, *base; } xpc_reader_t;
 
+typedef struct {
+    xpc_reader_t r;
+    const mach_port_t *ports;   /* send rights from the OOL_PORTS descriptor */
+    mach_msg_size_t nports;
+} xpc_deser_t;
+
 static bool read_bytes(xpc_reader_t *r, size_t n, const uint8_t **out) {
     if (n > (size_t)(r->end - r->p)) return false;
     *out = r->p; r->p += n; return true;
@@ -52,9 +58,10 @@ static bool align4(xpc_reader_t *r) {
     const uint8_t *unused; return read_bytes(r, n, &unused);
 }
 
-static xpc_object_t read_value(xpc_reader_t *r);
+static xpc_object_t read_value(xpc_deser_t *d);
 
-static xpc_object_t read_value(xpc_reader_t *r) {
+static xpc_object_t read_value(xpc_deser_t *d) {
+    xpc_reader_t *r = &d->r;
     uint32_t tag, n; uint64_t q; const uint8_t *p;
     if (!read_u32(r, &tag)) return NULL;
     switch (tag) {
@@ -63,10 +70,17 @@ static xpc_object_t read_value(xpc_reader_t *r) {
     case XPC_WIRE_INT64: if (!read_u64(r, &q)) return NULL; return xpc_int64_create((int64_t)q);
     case XPC_WIRE_UINT64: if (!read_u64(r, &q)) return NULL; return xpc_uint64_create(q);
     case XPC_WIRE_DOUBLE: {
-        double d; if (!read_u64(r, &q)) return NULL; memcpy(&d, &q, 8); return xpc_double_create(d);
+        double dbl; if (!read_u64(r, &q)) return NULL; memcpy(&dbl, &q, 8); return xpc_double_create(dbl);
     }
     case XPC_WIRE_DATE: if (!read_u64(r, &q)) return NULL; return xpc_date_create((int64_t)q);
     case XPC_WIRE_UUID: if (!read_bytes(r, 16, &p)) return NULL; return xpc_uuid_create(p);
+    case XPC_WIRE_MACH_SEND:
+        /* The wire value is the index into the message's OOL_PORTS
+         * descriptor array.  Without that table the value is
+         * unresolvable, so treat it as malformed input. */
+        if (!read_u64(r, &q)) return NULL;
+        if (!d->ports || q >= d->nports) return NULL;
+        return xpc_mach_send_create_owned(d->ports[q]);
     case XPC_WIRE_DATA:
         if (!read_u32(r, &n) || !read_bytes(r, n, &p) || !align4(r)) return NULL;
         return xpc_data_create(p, n);
@@ -77,8 +91,8 @@ static xpc_object_t read_value(xpc_reader_t *r) {
     case XPC_WIRE_ARRAY: {
         uint32_t body_len, count; const uint8_t *body;
         if (!read_u32(r, &body_len) || !read_bytes(r, body_len, &body)) return NULL;
-        xpc_reader_t inner = { body, body + body_len, body };
-        if (!read_u32(&inner, &count)) return NULL;
+        xpc_deser_t inner = { { body, body + body_len, body }, d->ports, d->nports };
+        if (!read_u32(&inner.r, &count)) return NULL;
         xpc_object_t a = xpc_array_create(NULL, 0);
         for (uint32_t i = 0; i < count; i++) {
             xpc_object_t v = read_value(&inner);
@@ -91,45 +105,68 @@ static xpc_object_t read_value(xpc_reader_t *r) {
         uint32_t body_len, count;
         const uint8_t *body;
         if (!read_u32(r, &body_len) || !read_bytes(r, body_len, &body)) return NULL;
-        xpc_reader_t inner = { body, body + body_len, body };
-        if (!read_u32(&inner, &count)) return NULL;
-        xpc_object_t d = xpc_dictionary_create(NULL, NULL, 0);
+        xpc_deser_t inner = { { body, body + body_len, body }, d->ports, d->nports };
+        if (!read_u32(&inner.r, &count)) return NULL;
+        xpc_object_t dict = xpc_dictionary_create(NULL, NULL, 0);
         for (uint32_t i = 0; i < count; i++) {
-            const uint8_t *key = inner.p; size_t key_len = 0;
-            while (inner.p < inner.end && *inner.p) { inner.p++; key_len++; }
-            if (inner.p >= inner.end) { xpc_release(d); return NULL; }
-            inner.p++;
-            if (!align4(&inner)) { xpc_release(d); return NULL; }
+            const uint8_t *key = inner.r.p; size_t key_len = 0;
+            while (inner.r.p < inner.r.end && *inner.r.p) { inner.r.p++; key_len++; }
+            if (inner.r.p >= inner.r.end) { xpc_release(dict); return NULL; }
+            inner.r.p++;
+            if (!align4(&inner.r)) { xpc_release(dict); return NULL; }
             xpc_object_t v = read_value(&inner);
-            if (!v) { xpc_release(d); return NULL; }
+            if (!v) { xpc_release(dict); return NULL; }
             char *copy = malloc(key_len + 1);
-            if (!copy) { xpc_release(v); xpc_release(d); return NULL; }
+            if (!copy) { xpc_release(v); xpc_release(dict); return NULL; }
             memcpy(copy, key, key_len); copy[key_len] = 0;
-            xpc_dictionary_set_value(d, copy, v);
+            xpc_dictionary_set_value(dict, copy, v);
             free(copy); xpc_release(v);
         }
-        return d;
+        return dict;
     }
     default: return NULL;
     }
 }
 
-xpc_object_t xpc_wire_deserialize(const void *bytes, size_t len) {
-    if (!bytes || len < 40) return NULL;
-    const uint8_t *b = bytes; uint32_t body_len;
-    if (memcmp(b + 24, XPC_WIRE_MAGIC, 4) != 0) return NULL;
-    body_len = (uint32_t)b[36] | ((uint32_t)b[37] << 8) |
-        ((uint32_t)b[38] << 16) | ((uint32_t)b[39] << 24);
-    if ((size_t)body_len > len - 40) return NULL;
-    xpc_reader_t r = { b + 40, b + 40 + body_len, b + 40 };
-    uint32_t count; if (!read_u32(&r, &count)) return NULL;
+/*
+ * Envelope location:  real launchd sends large replies as an OOL
+ * descriptor whose region begins with the naked envelope (magic at
+ * offset 0), while small replies arrive inline after the mach header
+ * (magic at offset 24).  Return the envelope offset, or -1.
+ */
+static long
+xpc_envelope_offset(const uint8_t *b, size_t len)
+{
+    if (len >= 16 && memcmp(b, XPC_WIRE_MAGIC, 4) == 0) return 0;
+    if (len >= 40 && memcmp(b + 24, XPC_WIRE_MAGIC, 4) == 0) return 24;
+    return -1;
+}
+
+xpc_object_t
+xpc_wire_deserialize_with_ports(const void *bytes, size_t len,
+    const mach_port_t *ports, mach_msg_size_t nports)
+{
+    if (!bytes || len < 16) return NULL;
+    const uint8_t *b = bytes;
+    long env_off = xpc_envelope_offset(b, len);
+    if (env_off < 0) return NULL;
+    const uint8_t *env = b + env_off;
+    uint32_t body_len;
+    body_len = (uint32_t)env[12] | ((uint32_t)env[13] << 8) |
+        ((uint32_t)env[14] << 16) | ((uint32_t)env[15] << 24);
+    size_t body_off = (size_t)env_off + 16;
+    if ((size_t)body_len > len - body_off) return NULL;
+    xpc_deser_t de = { { b + body_off, b + body_off + body_len,
+        b + body_off }, ports, nports };
+    xpc_reader_t *r = &de.r;
+    uint32_t count; if (!read_u32(r, &count)) return NULL;
     xpc_object_t d = xpc_dictionary_create(NULL, NULL, 0);
     for (uint32_t i = 0; i < count; i++) {
-        const uint8_t *key = r.p; size_t key_len = 0;
-        while (r.p < r.end && *r.p) { r.p++; key_len++; }
-        if (r.p >= r.end) { xpc_release(d); return NULL; }
-        r.p++; if (!align4(&r)) { xpc_release(d); return NULL; }
-        xpc_object_t v = read_value(&r);
+        const uint8_t *key = r->p; size_t key_len = 0;
+        while (r->p < r->end && *r->p) { r->p++; key_len++; }
+        if (r->p >= r->end) { xpc_release(d); return NULL; }
+        r->p++; if (!align4(r)) { xpc_release(d); return NULL; }
+        xpc_object_t v = read_value(&de);
         if (!v) { xpc_release(d); return NULL; }
         char *copy = malloc(key_len + 1);
         if (!copy) { xpc_release(v); xpc_release(d); return NULL; }
@@ -138,4 +175,10 @@ xpc_object_t xpc_wire_deserialize(const void *bytes, size_t len) {
         free(copy); xpc_release(v);
     }
     return d;
+}
+
+xpc_object_t
+xpc_wire_deserialize(const void *bytes, size_t len)
+{
+    return xpc_wire_deserialize_with_ports(bytes, len, NULL, 0);
 }

@@ -531,10 +531,20 @@ int main(int argc, char **argv)
     printf("  msgh_remote  = %#x\n", remote);
     printf("  msgh_local   = %#x\n", local);
     printf("  msgh_voucher = %#x\n", voucher);
-    printf("  msgh_id      = %#08x  %s\n", msgh_id,
-           msgh_id == 0x10000000 ? "(simpleroutine request)" :
-           msgh_id == 0x40000000 ? "(routine request)"       :
-           msgh_id == 0x20000000 ? "(routine reply)"         : "?");
+    const char *id_kind;
+    char id_buf[64];
+    if (msgh_id == 0x20000000) {
+        id_kind = "routine reply";
+    } else if (msgh_id & 0x40000000) {
+        snprintf(id_buf, sizeof(id_buf), "routine request; routine 0x%x",
+            msgh_id & 0xffff);
+        id_kind = id_buf;
+    } else if (msgh_id & 0x10000000) {
+        id_kind = "simpleroutine request";
+    } else {
+        id_kind = "?";
+    }
+    printf("  msgh_id      = %#08x  %s\n", msgh_id, id_kind);
 
     /* --- XPC envelope --- */
     if (len < 28 || memcmp(buf + 24, "CPX@", 4) != 0) {

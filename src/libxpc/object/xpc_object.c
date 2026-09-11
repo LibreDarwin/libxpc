@@ -106,6 +106,13 @@ xpc_release(xpc_object_t obj)
         free(e->desc);
         break;
     }
+    case XPC_KIND_MACH_SEND: {
+        xpc_mach_send_t *m = XPC_CAST(xpc_mach_send_t, obj);
+        if (m->dispose) {
+            mach_port_deallocate(mach_task_self(), m->port);
+        }
+        break;
+    }
     case XPC_KIND_ENDPOINT:
     case XPC_KIND_CONNECTION:
         /* mach ports are managed by the kernel; no heap payload. */

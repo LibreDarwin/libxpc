@@ -275,6 +275,18 @@ void xpc_dictionary_set_uuid(xpc_object_t object, const char *key,
     const uuid_t uuid);
 void xpc_dictionary_set_date(xpc_object_t object, const char *key,
     int64_t value);
+void xpc_dictionary_set_mach_send(xpc_object_t object, const char *key,
+    mach_port_t port);
+
+#pragma mark - Mach-Send
+
+/*
+ * Wrap a send right for transport.  The object borrows the right; the
+ * caller keeps ownership and remains responsible for it.  Mirrors
+ * Apple's xpc_mach_send_create(3).
+ */
+xpc_object_t xpc_mach_send_create(mach_port_t port);
+mach_port_t xpc_mach_send_get_port(xpc_object_t object);
 
 #ifdef __cplusplus
 }

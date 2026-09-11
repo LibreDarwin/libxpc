@@ -74,6 +74,7 @@ typedef enum xpc_kind {
     XPC_KIND_DATA,
     XPC_KIND_STRING,
     XPC_KIND_UUID,
+    XPC_KIND_MACH_SEND,
     XPC_KIND_ARRAY,
     XPC_KIND_DICTIONARY,
     XPC_KIND_ERROR,
@@ -141,6 +142,13 @@ typedef struct _xpc_uuid_s {
     uuid_t uuid;
 } xpc_uuid_t;
 
+typedef struct _xpc_mach_send_s {
+    struct _xpc_object_s hdr;
+    mach_port_t port;       /* send right */
+    bool dispose;           /* true: release deallocates the right
+                             * (rights received from the wire) */
+} xpc_mach_send_t;
+
 typedef struct _xpc_array_s {
     struct _xpc_object_s hdr;
     xpc_object_t *items;
@@ -154,6 +162,8 @@ typedef struct _xpc_dictionary_s {
     xpc_object_t *values;
     size_t count;
     size_t capacity;
+    audit_token_t audit_token;  /* sender token, set on receipt (§xpc_routines) */
+    bool has_audit_token;
 } xpc_dictionary_t;
 
 typedef struct _xpc_error_s {
@@ -183,6 +193,7 @@ extern const struct _xpc_type_s _xpc_type_date;
 extern const struct _xpc_type_s _xpc_type_data;
 extern const struct _xpc_type_s _xpc_type_string;
 extern const struct _xpc_type_s _xpc_type_uuid;
+extern const struct _xpc_type_s _xpc_type_mach_send;
 extern const struct _xpc_type_s _xpc_type_array;
 extern const struct _xpc_type_s _xpc_type_dictionary;
 extern const struct _xpc_type_s _xpc_type_error;
@@ -199,6 +210,11 @@ xpc_kind_t xpc_kind_from_type(xpc_type_t t);
 xpc_object_t xpc_object_alloc(xpc_type_t t, size_t size);
 xpc_object_t xpc_object_alloc_scalar(xpc_type_t t);
 
+/* Mach-send construction.  The public xpc_mach_send_create() borrows the
+ * right; xpc_mach_send_create_owned() takes a received right (COPY_SEND
+ * from an OOL_PORTS descriptor) and deallocates it on release. */
+xpc_object_t xpc_mach_send_create_owned(mach_port_t port);
+
 #pragma mark - Serialization (xpc_serialize.c)
 
 /* Type tags as they appear on the wire.  (docs/WIRE_FORMAT.md §4) */
@@ -212,6 +228,7 @@ enum {
     XPC_WIRE_DATA   = 0x8000,
     XPC_WIRE_STRING = 0x9000,
     XPC_WIRE_UUID   = 0xa000,
+    XPC_WIRE_MACH_SEND = 0x6000,
     XPC_WIRE_ARRAY  = 0xe000,
     XPC_WIRE_DICT   = 0xf000,
 };
@@ -241,6 +258,15 @@ uint8_t *xpc_wire_serialize(xpc_object_t object, uint32_t msg_id,
  */
 xpc_object_t xpc_wire_deserialize(const void *bytes, size_t len);
 
+/*
+ * Variant that can resolve mach-send values (wire tag 0x6000): ports is
+ * the array of send rights carried in the message's OOL_PORTS descriptor.
+ * Mach-send objects created from the array borrow the rights; the caller
+ * keeps ownership.  ports may be NULL when the message carried none.
+ */
+xpc_object_t xpc_wire_deserialize_with_ports(const void *bytes, size_t len,
+    const mach_port_t *ports, mach_msg_size_t nports);
+
 #pragma mark - Description (xpc_description.c)
 
 char *xpc_description_create(xpc_object_t object);
@@ -254,10 +280,25 @@ xpc_pipe_t xpc_pipe_create_from_port(mach_port_t port, uint64_t flags);
 int xpc_pipe_simpleroutine(xpc_pipe_t pipe, xpc_object_t obj,
     xpc_object_t *reply);
 int xpc_pipe_routine(xpc_pipe_t pipe, xpc_object_t obj,
-    xpc_object_t *reply);
+    xpc_object_t *reply, uint32_t routine);
+int xpc_pipe_routine_with_flags(xpc_pipe_t pipe, xpc_object_t obj,
+    xpc_object_t *reply, uint64_t flags, uint32_t routine);
 int xpc_pipe_invalidate(xpc_pipe_t pipe);
 
-/* msgh_id values (docs/WIRE_FORMAT.md §6). */
+/* Stash the sender's audit token onto a received dictionary. */
+void xpc_dictionary_set_audit_token(xpc_object_t dict,
+    const audit_token_t *token);
+
+/*
+ * msgh_id values (docs/WIRE_FORMAT.md §6, §11).  Confirmed against Apple's
+ * __xpc_pipe_pack_message (libxpc.dylib): base ids are
+ * 0x10000000 (simpleroutine) / 0x40000000 (routine); a reply id of
+ * 0x20000000 is AND'd in when a reply port is present.  The routine path
+ * ORs the routine number into the low 16 bits (real launchctl "list"
+ * observes as 0x400000cf); Apple's classic xpc_pipe_routine sends the
+ * bare base id, so the low bits are cosmetic for the server, which demuxes
+ * on the dict's "subsystem"/"routine" keys.
+ */
 enum {
     XPC_PIPE_ID_SIMPLEROUTINE = 0x10000000,
     XPC_PIPE_ID_ROUTINE       = 0x40000000,

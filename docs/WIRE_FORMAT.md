@@ -125,8 +125,17 @@ Nested dictionaries use **identical** key-value slot encoding as the top level.
 | ID | Direction | Meaning |
 |----|-----------|---------|
 | `0x10000000` | SEND | Simpleroutine request — fire-and-forget, no reply port in msgh_local_port |
-| `0x40000000` | SEND | Routine request — reply port carried in msgh_local_port |
+| `0x40000000` \| routine | SEND | Routine request — reply port carried in msgh_local_port (MAKE_SEND, `0x15`) |
 | `0x20000000` | SEND (reply) | Routine reply — sent on the send-once right of the reply port |
+
+**Routine ids carry the routine number in the low 16 bits.** The launchd-domain
+path (e.g. real `launchctl list`) sends `0x40000000 | routine & 0xffff` —
+observed **`0x400000cf`** for `list` on macOS 26.5. Note that Apple's classic
+`xpc_pipe_routine` (private API) sends the bare **`0x40000000`** with no low
+bits (confirmed by byte capture of the system libxpc, see §11); the routine
+bits are added higher in the launchctl call stack. The server demuxes on the
+dictionary's `"subsystem"`/`"routine"` keys, not on the msgh_id low bits, so
+both encodings interoperate.
 
 ---
 
@@ -242,3 +251,98 @@ tolerated-by-libxpc) message. The size must cover the entire inline payload.
 ---
 
 *Document generated from byte-exact captures of real XPC traffic, validated against libxpc disassembly, and confirmed by feeding hand-built messages back into libxpc's parser.*
+
+---
+
+## 11. Two Routine Encodings (2026-09 captures)
+
+Two byte layouts are observed in the wild for routine requests:
+
+### 11.1 Classic pipe contract (this implementation)
+
+Byte-exact capture of the **system libxpc** `xpc_pipe_routine` (probe4b,
+local-port loop, interposed `mach_msg`):
+
+```
+msgh_bits   = 0x00131513   remote=COPY_SEND(0x13) local=MAKE_SEND(0x15)
+                           voucher=COPY_SEND(0x13) — NOT complex
+msgh_id     = 0x40000000   (bare — no routine bits on the classic path)
+envelope    = offset 24    CPX@ ver=5 flags=0xf000 body_len count...
+```
+
+Simple message, envelope immediately after the 24-byte header, reply port in
+`msgh_local_port`. The reply is returned on the resulting send-once right
+(`MACH_MSG_TYPE_MOVE_SEND_ONCE`). Probe4b's full round-trip (send + hand-built
+`{"reply":1}` + parse by system libxpc) validates both directions byte-exactly.
+
+### 11.2 Modern launchd-domain contract (real launchctl)
+
+Byte-exact capture of re-signed `/bin/launchctl list` against **live launchd**
+(arm64e interposer, read-only commands only):
+
+```
+msgh_bits   = 0x80131513               complex | remote=COPY_SEND
+                                        local=MAKE_SEND voucher=COPY_SEND
+msgh_id     = 0x400000cf                base | routine (per-command, below)
+offset 24   = 01 00 00 00               msgh_descriptor_count = 1
+offset 28   = port descriptor           name = SAME port as msgh_remote_port
+                                        (the bootstrap/domain port), pad = 0,
+                                        disposition = 0x13 COPY_SEND,
+                                        type = 0x00 (MACH_MSG_PORT_DESCRIPTOR)
+envelope    = offset 40                 CPX@ ver=5 flags=0xf000 body_len...
+```
+
+The reply port is STILL carried in `msgh_local_port` (MAKE_SEND, same as the
+classic form) — the descriptor is a redundant send right for the domain port.
+The envelope/dict encoding is otherwise identical to the classic form.
+
+**Observed routine ids (read-only commands):**
+
+| Command | msgh_id | Request dict (selected keys) |
+|---------|---------|------------------------------|
+| `launchctl list` (legacy) | `0x4000032f` | handle, type, legacy, domain-port (mach send `0xd000`) |
+| `launchctl version` | `0x4000033c` | handle, shmem (`0xc000`), type, version (bool) |
+| housekeeping probe | `0x400000cf` | handle, instance (uuid), flags, name, type, targetpid, domain-port |
+| reply | `0x20000000` | rec_execcnt, req_pid, port (mach send), plus complex OOL descriptor form for the list payload |
+
+**This validates the reverse-engineered constant table**: our
+`XPC_ROUTINE_LIST = 0x32f` equals the real legacy-list routine, and the real
+`version` uses `0x33c` — the same id as our shmem-state routine family
+(`XPC_ROUTINE_PRINT`), consistent with the real request's `shmem` key. The
+observed `0xd000` (mach send value) and `0xc000` (shmem/OOL) value tags are
+not part of this implementation's serializer (no port/OOL payloads are
+emitted); noted for future interop work.
+
+Real launchd demuxes on the msgh_id low bits plus per-routine dict keys
+(no `subsystem` key on modern requests), whereas this implementation's
+stub dispatches on the dict `"subsystem"`/`"routine"` keys — both dialects
+are internally consistent, and this tree's wire is the classic
+`xpc_pipe_routine` form the system library itself emits.
+
+### 11.3 Live round-trips against real launchd (probe_routine)
+
+Driving the system libxpc (`_xpc_domain_routine` via dlsym) against the
+live bootstrap port closed both reply-side questions empirically:
+
+**Version (routine `0x33c`)** — request must carry a shared-memory region:
+`{handle:0, shmem: <xpc_shmem_create(region, 0x1000)>, type:1, version:true}`.
+launchd writes the version string into the caller's region and replies
+`{"bytes-written": 128}`:
+
+```
+Darwin Bootstrapper Version 7.0.0: Sat Apr 18 19:58:40 PDT 2026;
+root:libxpc_executables-3102.120.13~112/launchd/RELEASE_ARM64E
+```
+
+**Legacy list (routine `0x32f`)** — the minimal request `{type:1, handle:0}`
+suffices; extra keys are ignored. The reply is a plain dictionary (no OOL,
+no shmem), 437 jobs on this system, wrapped under a `"services"` key with
+per-job entries `{pid: <int64>, status: <int64>}`. This is semantically the
+same contract this implementation's stub emits — the stub's per-job dicts
+are exactly `pid`/`status` as int64 — with two cosmetic deltas: the real
+reply nests the table under `"services"`, and real per-job dicts carry
+exactly those two keys (ours adds `active count`/`path`/`program`).
+
+The simple classic wire form is sufficient for both commands (Apple's own
+client emits it); the complex/descriptor preamble observed in launchctl
+traffic is not required by launchd for these routines.
