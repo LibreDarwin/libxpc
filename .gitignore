@@ -27,3 +27,6 @@ tools/probe/probe8
 tools/probe/probe9
 tools/wiredecode/wiredecode
 build/
+tools/probe/probe9
+tools/probe/probe10
+tools/probe/maptest

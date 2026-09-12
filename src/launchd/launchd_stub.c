@@ -79,6 +79,11 @@ int launchctl_main(int argc, char **argv);
 #define XPC_ROUTINE_SETENV 0x333
 #endif
 
+/* Version string written into the caller's shared-memory region by the
+ * PRINT handler — the stub's stand-in for launchd's build banner. */
+#define STUB_VERSION_STRING \
+    "Darwin Bootstrapper Version 7.0.0: xnuports-stub launchd"
+
 #pragma mark - canned domain state
 
 struct stub_service {
@@ -410,14 +415,67 @@ handle_kickstart(xpc_object_t req, xpc_object_t reply)
     }
 }
 
+static void
+handle_print(xpc_object_t req, xpc_object_t reply)
+{
+    xpc_object_t shmem = xpc_dictionary_get_value(req, "shmem");
+    void *region = NULL;
+    size_t region_len = 0;
+    size_t n;
+
+    if (!shmem || xpc_get_type(shmem) != &_xpc_type_shmem) {
+        if (getenv("XPC_DEBUG")) {
+            fprintf(stderr, "[stub] print: no shmem value (obj=%p)\n",
+                (void *)shmem);
+        }
+        xpc_dictionary_set_int64(reply, "error",
+            XPC_LAUNCHD_ERROR_BAD_RESPONSE);
+        return;
+    }
+    /* The caller maps a region as a Mach memory entry and passes it as a
+     * shmem value; launchd maps that entry and writes its version string
+     * back into the region.  This is the wire round-trip probe9 validates:
+     * serialize (0xc000 tag + page-aligned size + port descriptor),
+     * deserialize-with-port-table, map, write. */
+    {
+        int map_kr = xpc_shmem_map(shmem, &region, &region_len);
+        if (map_kr != KERN_SUCCESS) {
+            if (getenv("XPC_DEBUG")) {
+                fprintf(stderr, "[stub] print: shmem_map kr=0x%x "
+                    "(port=0x%x)\n", map_kr, xpc_shmem_get_port(shmem));
+            }
+            xpc_dictionary_set_int64(reply, "error",
+                XPC_LAUNCHD_ERROR_BAD_RESPONSE);
+            return;
+        }
+    }
+    if (getenv("XPC_DEBUG")) {
+        fprintf(stderr, "[stub] print: mapped %zu bytes at %p\n",
+            region_len, region);
+    }
+    n = strlen(STUB_VERSION_STRING) + 1;
+    if (n > region_len) n = region_len;
+    memcpy(region, STUB_VERSION_STRING, n);
+    xpc_dictionary_set_uint64(reply, "bytes-written", n);
+}
+
 static xpc_object_t
-handle_request(xpc_object_t req)
+handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
 {
     uint64_t subsystem = xpc_dictionary_get_uint64(req, "subsystem");
     uint64_t routine = xpc_dictionary_get_uint64(req, "routine");
     xpc_object_t reply = xpc_dictionary_create(NULL, NULL, 0);
 
     xpc_dictionary_set_int64(reply, "error", 0);
+
+    /* Route by msgh_id low 16 bits first, like real launchd's wire
+     * dispatcher: the PRINT routine (0x33c) carries its request inline
+     * with no subsystem/routine keys — it's identified purely by the
+     * wire id (0x4000033c). */
+    if ((msgh_id & 0xffff) == XPC_ROUTINE_PRINT) {
+        handle_print(req, reply);
+        return reply;
+    }
 
     if (subsystem == XPC_LAUNCHD_SUBSYSTEM_SERVICE) {
         if (routine == XPC_ROUTINE_SERVICE_KICKSTART) {
@@ -529,7 +587,7 @@ local_routine_handler(const uint8_t *msg, size_t msg_len, uint32_t msgh_id,
         }
         return NULL;
     }
-    xpc_object_t reply = handle_request(req);
+    xpc_object_t reply = handle_request_with_id(req, msgh_id);
     uint64_t handled_routine = xpc_dictionary_get_uint64(req, "routine");
     xpc_release(req);
     if (!reply) {

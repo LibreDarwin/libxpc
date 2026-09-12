@@ -155,6 +155,10 @@ typedef struct _xpc_shmem_s {
     mach_port_t port;       /* memory-entry send right */
     uint64_t size;          /* page-aligned span of the entry */
     bool dispose;           /* true: release deallocates the right */
+    void *origin;           /* same-task origin region, or NULL (the kernel
+                             * refuses to re-map a task's own memory entry,
+                             * so for locally-created entries the origin IS
+                             * the mapping) */
 } xpc_shmem_t;
 
 typedef struct _xpc_array_s {
@@ -235,6 +239,9 @@ void xpc_pipe_set_local_handler(xpc_local_routine_handler_t handler);
  * version string); xpc_shmem_create_owned wraps a memory-entry right
  * received from the wire and deallocates it on release. */
 xpc_object_t xpc_shmem_create_owned(mach_port_t port, uint64_t size);
+/* Release path for XPC_KIND_SHMEM: deallocate a dispose-owned entry
+ * right and forget its same-task origin record. */
+void xpc_shmem_dispose(xpc_shmem_t *s);
 mach_port_t xpc_shmem_get_port(xpc_object_t obj);
 
 #pragma mark - Serialization (xpc_serialize.c)

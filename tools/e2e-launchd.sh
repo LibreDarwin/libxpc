@@ -78,8 +78,12 @@ expect_empty() {
 
 # --- wire plumbing -----------------------------------------------------
 
-# version: pipe setup + routine request/reply + string serialization
-expect_output "version" "xnuports" "$STUB" --launchctl "$LAUNCHCTL" -- version
+# version: pipe setup + PRINT routine request/reply + shmem wire round-trip.
+# The stub's PRINT handler maps the caller's memory entry and writes its
+# banner back into the region; version_cmd reads it there.  Pin the full
+# string so a shmem-map regression (empty region) fails this test.
+expect_output "version" "Darwin Bootstrapper Version 7.0.0: xnuports-stub launchd" \
+    "$STUB" --launchctl "$LAUNCHCTL" -- version
 
 # help is a local command: usage header, exit 0
 expect_output "help" "Usage: launchctl" "$STUB" --launchctl "$LAUNCHCTL" -- help

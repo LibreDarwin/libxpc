@@ -4,15 +4,19 @@
  * probe9.c — version routine (`PRINT` 0x33c) through OUR libxpc with a
  * genuine shared-memory value, against the live bootstrap port.
  *
- * This is §11.3 of docs/WIRE_FORMAT.md re-run with this tree's own
+* This is §11.3 of docs/WIRE_FORMAT.md re-run with this tree's own
  * serializer: the request maps a vm region as a Mach memory entry
  * (wire kind 0xc000), launchd maps that entry and writes its version
  * string back into the region, and the reply is the plain dict
  * {"bytes-written": N}.
  *
- * Build: cc -o probe9 probe9.c -I../.. -L../../build/release -lxpc \
- *            -Wl,-rpath,../../build/release
- * Run:   DYLD_INSERT_LIBRARIES=tools/probe/interpose.dylib ./probe9
+ *  Optional argv[1] sets the region size (default 0x1000).  A two-page
+ *  region (0x8000) validates that the wire's 8-byte shmem size field
+ *  carries the entry's real page-aligned span, not a constant.
+ *
+ *  Build: cc -o probe9 probe9.c -I../.. -L../../build/release -lxpc \
+ *             -Wl,-rpath,../../build/release
+ *  Run:   DYLD_INSERT_LIBRARIES=tools/probe/interpose.dylib ./probe9 [size]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +30,7 @@
 #include <xpc_private.h>
 
 int
-main(void)
+main(int argc, char **argv)
 {
     mach_port_t bp = MACH_PORT_NULL;
     kern_return_t kr = task_get_bootstrap_port(mach_task_self(), &bp);
@@ -34,8 +38,12 @@ main(void)
     if (kr != KERN_SUCCESS || !MACH_PORT_VALID(bp)) return 1;
 
     /* Version region: launchd maps the memory entry and writes into it. */
-    vm_address_t region = 0;
     vm_size_t region_len = 0x1000;
+    if (argc >= 2) {
+        region_len = (vm_size_t)strtoul(argv[1], NULL, 0);
+        if (region_len == 0) region_len = 0x1000;
+    }
+    vm_address_t region = 0;
     kr = vm_allocate(mach_task_self(), &region, region_len, VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "vm_allocate: 0x%x\n", kr);
@@ -48,7 +56,8 @@ main(void)
         fprintf(stderr, "xpc_shmem_create failed\n");
         return 1;
     }
-    fprintf(stderr, "shmem entry port=0x%x\n", xpc_shmem_get_port(shmem));
+    fprintf(stderr, "shmem entry port=0x%x region_len=0x%zx\n",
+        xpc_shmem_get_port(shmem), (size_t)region_len);
 
     xpc_object_t req = xpc_dictionary_create(NULL, NULL, 0);
     xpc_dictionary_set_uint64(req, "handle", 0);

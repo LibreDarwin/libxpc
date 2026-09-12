@@ -113,6 +113,11 @@ xpc_release(xpc_object_t obj)
         }
         break;
     }
+    case XPC_KIND_SHMEM: {
+        xpc_shmem_t *s = XPC_CAST(xpc_shmem_t, obj);
+        xpc_shmem_dispose(s);
+        break;
+    }
     case XPC_KIND_ENDPOINT:
     case XPC_KIND_CONNECTION:
         /* mach ports are managed by the kernel; no heap payload. */

@@ -385,8 +385,59 @@ version_cmd(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    fprintf(stdout, "launchctl (xnuports libxpc) — Darwin service management\n");
-    return 0;
+    struct xpc_global_data *state;
+    kern_return_t kr;
+    xpc_object_t request = NULL;
+    xpc_object_t reply = NULL;
+    xpc_object_t shmem = NULL;
+    vm_address_t region = 0;
+    vm_size_t region_len = 0x1000;
+    const char *version;
+    int rc = 1;
+
+    /* Version banner comes from launchd, written into a shared-memory
+     * region mapped as a Mach memory entry (the PRINT routine's reply
+     * channel, wire kind 0xc000).  Matches Apple's launchctl.  Goes
+     * through the global bootstrap pipe so the launchd_stub harness
+     * (XNUXPORTS_LAUNCHD_PORT) serves it too. */
+    state = xpc_global_data();
+    if (!state->xpc_bootstrap_pipe) {
+        fprintf(stdout,
+            "launchctl (xnuports libxpc) — Darwin service management\n");
+        return 0;
+    }
+    kr = vm_allocate(mach_task_self(), &region, region_len, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        return 1;
+    }
+    memset((void *)region, 0, region_len);
+
+    shmem = xpc_shmem_create((void *)region, region_len);
+    if (!shmem) {
+        goto out;
+    }
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_uint64(request, "handle", 0);
+    xpc_dictionary_set_value(request, "shmem", shmem);
+    xpc_dictionary_set_uint64(request, "type", 1);
+    xpc_dictionary_set_bool(request, "version", true);
+
+    if (xpc_pipe_routine(state->xpc_bootstrap_pipe, request, &reply,
+            XPC_ROUTINE_PRINT) != 0) {
+        goto out;
+    }
+    version = (const char *)region;
+    if (!version[0]) {
+        goto out;
+    }
+    fprintf(stdout, "%s\n", version);
+    rc = 0;
+out:
+    if (reply) xpc_release(reply);
+    if (request) xpc_release(request);
+    if (shmem) xpc_release(shmem);
+    if (region) vm_deallocate(mach_task_self(), region, region_len);
+    return rc;
 }
 
 static int
