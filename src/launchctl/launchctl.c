@@ -84,6 +84,7 @@ static int kickstart_cmd(int argc, char **argv);
 static int kill_cmd(int argc, char **argv);
 static int list_cmd(int argc, char **argv);
 static int getenv_cmd(int argc, char **argv);
+static int setenv_cmd(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help", "Print this help.", "", help_cmd },
@@ -105,6 +106,8 @@ static const struct command commands[] = {
       list_cmd },
     { "getenv", "Gets an environment variable from within launchd.",
       "<key>", getenv_cmd },
+    { "setenv", "Set or clear an environment variable in launchd.",
+      "<key> [value]", setenv_cmd },
 };
 
 #define COMMAND_COUNT (sizeof(commands) / sizeof(commands[0]))
@@ -330,7 +333,9 @@ create_bootstrap_paths_array(int path_count, char *const paths[])
             xpc_release(array);
             return NULL;
         }
-        xpc_array_append_value(array, xpc_string_create(full_path));
+        xpc_object_t str = xpc_string_create(full_path);
+        xpc_array_append_value(array, str);
+        xpc_release(str);
         free(full_path);
     }
     return array;
@@ -562,7 +567,9 @@ enable_disable_cmd(int argc, char **argv)
     if (!error) {
         names = xpc_array_create(NULL, 0);
         xpc_dictionary_set_value(request, "names", names);
-        xpc_array_append_value(names, xpc_string_create(service_name));
+        xpc_object_t name = xpc_string_create(service_name);
+        xpc_array_append_value(names, name);
+        xpc_release(name);
         error = xpc_domain_routine(routine, request, &reply);
         if (error != XPC_LAUNCHD_ERROR_DOMAIN_NOT_FOUND && error) {
             fprintf(stderr, "Could not %s service: %d: %s\n", argv[0],
@@ -817,6 +824,53 @@ getenv_cmd(int argc, char **argv)
     } else {
         /* Legacy getenv is silent on routine errors. */
         error = 0;
+    }
+    if (reply) xpc_release(reply);
+    xpc_release(request);
+    return error;
+}
+
+/*
+ * setenv: set (<key> <value>) or clear (<key>) an environment variable in
+ * launchd's domain.  Wire form is the legacy domain request carrying
+ * "envvars", a dict of key -> string (set) or null (clear); launchd's
+ * SETENV handler treats a null value exactly as an unset (verified against
+ * the live wire trace and the stub).  One or two arguments only — the
+ * bare-key form is an idempotent unset, and launchctl(1) exits 0 either
+ * way.
+ */
+static int
+setenv_cmd(int argc, char **argv)
+{
+    xpc_object_t request;
+    xpc_object_t envvars;
+    xpc_object_t value = NULL;
+    xpc_object_t reply = NULL;
+    int error;
+
+    if (argc < 2 || argc > 3) {
+        return 'u';
+    }
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    set_legacy_domain_request(request);
+
+    envvars = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_value(request, "envvars", envvars);
+    if (argc == 3) {
+        value = xpc_string_create(argv[2]);
+    } else {
+        /* Bare-key form clears the variable: null on the wire, which
+         * launchd's SETENV handler treats as an unset. */
+        value = xpc_null_create();
+    }
+    xpc_dictionary_set_value(envvars, argv[1], value);
+    xpc_release(value);
+    xpc_release(envvars);
+
+    error = xpc_domain_routine(XPC_ROUTINE_SETENV, request, &reply);
+    if (error && error != XPC_LAUNCHD_ERROR_DOMAIN_NOT_FOUND) {
+        fprintf(stderr, "Setenv failed: %d: %s\n", error,
+            xpc_strerror(error));
     }
     if (reply) xpc_release(reply);
     xpc_release(request);

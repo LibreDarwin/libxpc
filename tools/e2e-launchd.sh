@@ -104,6 +104,19 @@ expect_output "env override" "fresh-value" \
     "$STUB" --launchctl "$LAUNCHCTL" \
     --env XNUXPORTS_TEST_VAR=fresh-value -- getenv XNUXPORTS_TEST_VAR
 
+# setenv: legacy SETENV routine (0x333) round-trip carrying the "envvars"
+# dict.  Two-arg form sets (string value over the wire); one-arg form
+# clears (null value over the wire).  Both succeed silently — matching
+# launchctl(1) — and the usage error path exits 64.
+check "setenv set" 0 \
+    "$STUB" --launchctl "$LAUNCHCTL" -- setenv XNUXPORTS_WIRE_VAR wire-value
+check "setenv unset" 0 \
+    "$STUB" --launchctl "$LAUNCHCTL" -- setenv XNUXPORTS_WIRE_VAR
+check "setenv no args" 64 \
+    "$STUB" --launchctl "$LAUNCHCTL" -- setenv
+check "setenv too many" 64 \
+    "$STUB" --launchctl "$LAUNCHCTL" -- setenv KEY value extra
+
 # --- service table -----------------------------------------------------
 
 # whole-table list

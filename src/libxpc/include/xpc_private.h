@@ -79,6 +79,9 @@ enum xpc_launchd_domain_routine {
     XPC_ROUTINE_BOOTOUT     = 0x321, /* tear down a domain/service */
     XPC_ROUTINE_KILL        = 0x32c, /* signal a service instance */
     XPC_ROUTINE_LIST        = 0x32f, /* legacy list (services/one) */
+    XPC_ROUTINE_SETENV      = 0x333, /* set/unset launchd env vars for
+                                        domain (dict value is NULL for
+                                        unset, string otherwise) */
     XPC_ROUTINE_GETENV      = 0x334, /* read launchd env for domain
                                         (0x336 is resolve-port) */
     XPC_ROUTINE_ENABLE      = 0x328, /* enable service by name */

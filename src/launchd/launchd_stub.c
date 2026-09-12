@@ -75,10 +75,6 @@ int launchctl_main(int argc, char **argv);
     (MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) | \
      MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT))
 
-#ifndef XPC_ROUTINE_SETENV
-#define XPC_ROUTINE_SETENV 0x333
-#endif
-
 /* Version string written into the caller's shared-memory region by the
  * PRINT handler — the stub's stand-in for launchd's build banner. */
 #define STUB_VERSION_STRING \
