@@ -76,6 +76,7 @@ struct command {
 
 static int help_cmd(int argc, char **argv);
 static int version_cmd(int argc, char **argv);
+static int print_cmd(int argc, char **argv);
 static int bootstrap_cmd(int argc, char **argv);
 static int service_target_required_error(const char *cmd);
 static int bootout_cmd(int argc, char **argv);
@@ -89,6 +90,8 @@ static int setenv_cmd(int argc, char **argv);
 static const struct command commands[] = {
     { "help", "Print this help.", "", help_cmd },
     { "version", "Print the version.", "", version_cmd },
+    { "print", "Print the state of a domain.", "<domain-target>",
+      print_cmd },
     { "bootstrap", "Bootstraps a domain or a service into a domain.",
       "<domain-target> [service-path ...]", bootstrap_cmd },
     { "bootout", "Tears down a domain or removes a service.",
@@ -443,6 +446,120 @@ out:
     if (shmem) xpc_release(shmem);
     if (region) vm_deallocate(mach_task_self(), region, region_len);
     return rc;
+}
+
+/*
+ * print: dump a domain's runtime state.  Same PRINT transport and reply
+ * channel as version (launchd serializes the requested domain's state as
+ * text into the caller's shmem region), but target-driven: the request
+ * carries the domain's type/handle instead of {"version": true}.  The
+ * region is a 256 KB granule: real launchd fills the whole region
+ * without a trailing NUL when a domain's state exceeds the span, so the
+ * dump is emitted with an explicit byte bound (reply "bytes-written"
+ * when present, else strnlen), never as a raw %s.  The stub writes a
+ * deterministic canned dump in the same shape.  Domain targets only —
+ * service-target prints (the per-service state path) are not
+ * implemented here.
+ */
+static int
+print_cmd(int argc, char **argv)
+{
+    struct xpc_global_data *state;
+    kern_return_t kr;
+    xpc_object_t request = NULL;
+    xpc_object_t reply = NULL;
+    xpc_object_t shmem = NULL;
+    vm_address_t region = 0;
+    vm_size_t region_len = 0x40000;
+    char *service_name = NULL;
+    const char *state_text;
+    int error;
+
+    REQUIRE_ARGS(2);
+    state = xpc_global_data();
+    if (!state->xpc_bootstrap_pipe) {
+        fprintf(stderr, "Print failed: no bootstrap pipe\n");
+        return 1;
+    }
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    error = parse_service_target(argv[1], request, &service_name);
+    if (error == LAUNCHCTL_STATUS_SERVICE_TARGET_REQUIRED) {
+        xpc_release(request);
+        return service_target_required_error("print");
+    }
+    if (!error && service_name) {
+        fprintf(stderr, "print: service targets are not supported yet "
+            "(domain targets only)\n");
+        error = LAUNCHCTL_STATUS_UNKNOWN_COMMAND;
+        goto out;
+    }
+    kr = vm_allocate(mach_task_self(), &region, region_len, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        error = kr;
+        goto out;
+    }
+    memset((void *)region, 0, region_len);
+
+    shmem = xpc_shmem_create((void *)region, region_len);
+    if (!shmem) {
+        error = ENOMEM;
+        goto out;
+    }
+    xpc_dictionary_set_value(request, "shmem", shmem);
+
+    error = xpc_pipe_routine(state->xpc_bootstrap_pipe, request, &reply,
+        XPC_ROUTINE_PRINT);
+    if (error) {
+        fprintf(stderr, "Print failed: %d: %s\n", error, xpc_strerror(error));
+        goto out;
+    }
+    /* launchd reports routine failures in the reply payload ("error")
+     * while the transport itself succeeds — surface those. */
+    {
+        int64_t rerr = reply ? xpc_dictionary_get_int64(reply, "error") : 0;
+        if (rerr != 0) {
+            fprintf(stderr, "Print failed: %lld: %s\n", (long long)rerr,
+                xpc_strerror((int)rerr));
+            error = (int)rerr;
+            goto out;
+        }
+    }
+    /*
+     * The dump is written into our region.  Real launchd can fill the
+     * whole region without a trailing NUL when the state exceeds the
+     * span, so never emit the region as a raw %s — it walks off the end
+     * of the mapping.  Prefer the reply's "bytes-written" when present;
+     * otherwise bound the read with strnlen.  A dump that hits the
+     * bound is truncated.
+     */
+    state_text = (const char *)region;
+    if (!state_text[0]) {
+        error = XPC_LAUNCHD_ERROR_BAD_RESPONSE;
+        goto out;
+    }
+    {
+        size_t avail = region_len - 1;
+        size_t n = 0;
+        if (reply) {
+            uint64_t bw = xpc_dictionary_get_uint64(reply, "bytes-written");
+            if (bw && bw < (uint64_t)avail) {
+                n = (size_t)bw;
+            }
+        }
+        if (!n) {
+            n = strnlen(state_text, avail);
+        }
+        fwrite(state_text, 1, n, stdout);
+        fputc('\n', stdout);
+    }
+    error = 0;
+out:
+    if (reply) xpc_release(reply);
+    if (request) xpc_release(request);
+    if (shmem) xpc_release(shmem);
+    if (region) vm_deallocate(mach_task_self(), region, region_len);
+    free(service_name);
+    return error;
 }
 
 static int

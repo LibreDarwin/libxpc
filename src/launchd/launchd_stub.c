@@ -449,9 +449,38 @@ handle_print(xpc_object_t req, xpc_object_t reply)
         fprintf(stderr, "[stub] print: mapped %zu bytes at %p\n",
             region_len, region);
     }
-    n = strlen(STUB_VERSION_STRING) + 1;
-    if (n > region_len) n = region_len;
-    memcpy(region, STUB_VERSION_STRING, n);
+    if (xpc_dictionary_get_bool(req, "version")) {
+        /* Canned banner for launchctl version (PRINT + {"version": true}) —
+         * the stub's stand-in for launchd's actual build banner. */
+        n = strlen(STUB_VERSION_STRING) + 1;
+        if (n > region_len) n = region_len;
+        memcpy(region, STUB_VERSION_STRING, n);
+    } else {
+        /* Domain state dump for launchctl print <target>.  Real launchd
+         * serializes its runtime state as text into the region; the stub
+         * writes a deterministic domain stub in the same shape. */
+        char buf[256];
+        uint64_t type = xpc_dictionary_get_uint64(req, "type");
+        uint64_t handle = xpc_dictionary_get_uint64(req, "handle");
+        const char *domain_name;
+        switch (type) {
+        case 1:  domain_name = "system"; break;
+        case 2:  domain_name = "user";   break;
+        case 3:  domain_name = "login";  break;
+        case 5:  domain_name = "pid";    break;
+        case 7:  domain_name = "port";   break;
+        case 8:  domain_name = "gui";    break;
+        default: domain_name = "unknown"; break;
+        }
+        n = (size_t)snprintf(buf, sizeof(buf),
+            "%s = {\n\tactive count = 1\n\tpath = /sbin/launchd\n"
+            "\tstate = running\n\thandle = %llu\n}\n",
+            domain_name, (unsigned long long)handle);
+        if (n + 1 > sizeof(buf)) n = sizeof(buf) - 1; /* cannot truncate */
+        if (n >= region_len) n = region_len - 1;      /* clamp to region */
+        memcpy(region, buf, n);
+        ((char *)region)[n] = '\0';                   /* %s-friendly */
+    }
     xpc_dictionary_set_uint64(reply, "bytes-written", n);
 }
 
