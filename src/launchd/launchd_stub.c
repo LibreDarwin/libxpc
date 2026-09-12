@@ -467,100 +467,93 @@ handle_request(xpc_object_t req)
     return reply;
 }
 
-#pragma mark - mach server
+#pragma mark - local routine bridge
 
-static volatile sig_atomic_t g_quit = 0;
-
-static void *
-serve_thread(void *arg)
+/*
+ * Same-task handler registered with the pipe layer.  A Mach reply port's
+ * send-once right is not visible to the receiver when client and server
+ * share one task (receive clobbers msgh_local_port with the received-on
+ * port name), so the stub dispatches the fully serialized request here
+ * instead of through mach_msg.  The complete wire round-trip is still
+ * exercised: descriptor walk, deserialize with the port table, the
+ * routine handler, and reply serialization.
+ */
+static uint8_t *
+local_routine_handler(const uint8_t *msg, size_t msg_len, uint32_t msgh_id,
+    size_t *reply_len)
 {
-    mach_port_t server_port = (mach_port_t)(uintptr_t)arg;
-    uint8_t buffer[65536] __attribute__((aligned(16)));
+    *reply_len = 0;
+    if (msg_len < 24) return NULL;
 
-    for (;;) {
-        mach_msg_header_t *hdr = (mach_msg_header_t *)(void *)buffer;
-        mach_msg_return_t mr = mach_msg(hdr,
-            MACH_RCV_MSG | MACH_RCV_TIMEOUT | XPC_RCV_TRAILER_OPTS,
-            0, sizeof(buffer), server_port, 50, MACH_PORT_NULL);
-
-        if (mr == MACH_RCV_TIMED_OUT) {
-            if (g_quit) {
-                return NULL;
+    /* Locate the CPX@ envelope: simple messages carry it right after the
+     * mach header (offset 24); complex messages carry a descriptor array
+     * first, and any port descriptors become the deserializer's port
+     * table for mach-send values (e.g. the routine request's
+     * domain-port). */
+    const mach_msg_header_t *hdr =
+        (const mach_msg_header_t *)(void *)msg;
+    const uint8_t *payload = msg + 24;
+    size_t payload_len = msg_len - 24;
+    mach_port_t ports[32];
+    mach_msg_size_t nports = 0;
+    if ((hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) && msg_len >= 28) {
+        const uint32_t *desc_count =
+            (const uint32_t *)(void *)(msg + 24);
+        const mach_msg_descriptor_t *d =
+            (const mach_msg_descriptor_t *)(void *)(msg + 28);
+        size_t off = 28;
+        for (uint32_t di = 0; di < *desc_count && di < 32; di++) {
+            size_t dsize = (d->out_of_line.type == MACH_MSG_PORT_DESCRIPTOR)
+                ? sizeof(mach_msg_port_descriptor_t)
+                : sizeof(mach_msg_descriptor_t);
+            if (nports < 32 &&
+                d->out_of_line.type == MACH_MSG_PORT_DESCRIPTOR) {
+                ports[nports++] = d->port.name;
             }
-            continue;
+            d = (const mach_msg_descriptor_t *)(void *)((const uint8_t *)d
+                + dsize);
+            off += dsize;
         }
-        if (mr != KERN_SUCCESS) {
-            continue;
+        if (off < msg_len) {
+            payload = msg + off;
+            payload_len = msg_len - off;
         }
-        if ((hdr->msgh_id & XPC_PIPE_ID_ROUTINE) == 0 ||
-            (hdr->msgh_id & 0xffff) == 0) {
-            /* Routine requests must ride the routine class with a
-             * non-zero routine number in the low 16 bits
-             * (0x40000000 | routine, e.g. real launchctl "list" is
-             * 0x400000cf). Any id without them is a wire-format
-             * regression, not a supported call. */
-            if (getenv("XPC_DEBUG")) {
-                fprintf(stderr, "[stub] reject: msgh_id=0x%x size=%u\n",
-                    hdr->msgh_id, hdr->msgh_size);
-            }
-            xpc_object_t bad = xpc_dictionary_create(NULL, NULL, 0);
-            xpc_dictionary_set_int64(bad, "error",
-                XPC_LAUNCHD_ERROR_REQUEST_UNSUPPORTED);
-            size_t blen;
-            uint8_t *bout = xpc_wire_serialize(bad, XPC_PIPE_ID_REPLY, &blen);
-            xpc_release(bad);
-            if (bout) {
-                mach_msg_header_t *bh = (mach_msg_header_t *)(void *)bout;
-                bh->msgh_remote_port = hdr->msgh_remote_port;
-                bh->msgh_local_port = MACH_PORT_NULL;
-                bh->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-                (void)mach_msg(bh, MACH_SEND_MSG, bh->msgh_size, 0,
-                    MACH_PORT_NULL, 0, MACH_PORT_NULL);
-                free(bout);
-            }
-            continue;
-        }
-
-        xpc_object_t req = xpc_wire_deserialize(buffer, hdr->msgh_size);
-        if (!req) {
-            if (getenv("XPC_DEBUG")) {
-                fprintf(stderr, "[stub] drop: deserialize failed "
-                    "(size=%u)\n", hdr->msgh_size);
-            }
-            continue;
-        }
-        xpc_object_t reply = handle_request(req);
-        uint64_t handled_routine = xpc_dictionary_get_uint64(req, "routine");
-        xpc_release(req);
-        if (!reply) {
-            if (getenv("XPC_DEBUG")) {
-                fprintf(stderr, "[stub] drop: no reply object\n");
-            }
-            continue;
-        }
-
-        size_t length;
-        uint8_t *out = xpc_wire_serialize(reply, XPC_PIPE_ID_REPLY, &length);
-        xpc_release(reply);
-        if (!out) {
-            if (getenv("XPC_DEBUG")) {
-                fprintf(stderr, "[stub] drop: serialize failed\n");
-            }
-            continue;
-        }
-        mach_msg_header_t *rh = (mach_msg_header_t *)(void *)out;
-        rh->msgh_remote_port = hdr->msgh_remote_port;
-        rh->msgh_local_port = MACH_PORT_NULL;
-        rh->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-        (void)mach_msg(rh, MACH_SEND_MSG, rh->msgh_size, 0, MACH_PORT_NULL,
-            0, MACH_PORT_NULL);
-        if (getenv("XPC_DEBUG")) {
-            fprintf(stderr,
-                "[stub] served id=0x%x routine=%llu -> %zu bytes\n",
-                hdr->msgh_id, handled_routine, length);
-        }
-        free(out);
     }
+
+    xpc_object_t req = xpc_wire_deserialize_with_ports(payload, payload_len,
+        ports, nports);
+    if (!req) {
+        if (getenv("XPC_DEBUG")) {
+            fprintf(stderr, "[stub] drop: deserialize failed (size=%zu)\n",
+                msg_len);
+        }
+        return NULL;
+    }
+    xpc_object_t reply = handle_request(req);
+    uint64_t handled_routine = xpc_dictionary_get_uint64(req, "routine");
+    xpc_release(req);
+    if (!reply) {
+        if (getenv("XPC_DEBUG")) {
+            fprintf(stderr, "[stub] drop: no reply object\n");
+        }
+        return NULL;
+    }
+
+    size_t length;
+    uint8_t *out = xpc_wire_serialize(reply, XPC_PIPE_ID_REPLY, &length);
+    xpc_release(reply);
+    if (!out) {
+        if (getenv("XPC_DEBUG")) {
+            fprintf(stderr, "[stub] drop: serialize failed\n");
+        }
+        return NULL;
+    }
+    if (getenv("XPC_DEBUG")) {
+        fprintf(stderr, "[stub] served id=0x%x routine=%llu -> %zu bytes\n",
+            msgh_id, handled_routine, length);
+    }
+    *reply_len = length;
+    return out;
 }
 
 #pragma mark - harness
@@ -578,7 +571,6 @@ main(int argc, char **argv)
 {
     const char *launchctl_path = "build/release/launchctl";
     mach_port_t server_port = MACH_PORT_NULL;
-    pthread_t server_thread;
     kern_return_t kr;
     int i, rc;
 
@@ -635,35 +627,32 @@ main(int argc, char **argv)
         setenv("XNUXPORTS_LAUNCHD_PORT", portbuf, 1);
     }
 
-    if (pthread_create(&server_thread, NULL, serve_thread,
-            (void *)(uintptr_t)server_port) != 0) {
-        perror("pthread_create");
+    /* Same-task bridge: a reply port's send-once right is invisible to a
+     * receiver in the same task (receive clobbers msgh_local_port with the
+     * received-on port name), and fork() does not clone the Mach port
+     * namespace on this macOS, so the pipe layer dispatches the serialized
+     * request straight to local_routine_handler instead.  The client walks
+     * the identical serialize path either way. */
+    xpc_pipe_set_local_handler(local_routine_handler);
+
+    /* Run the launchctl command in-process against the local handler. */
+    char **launchctl_argv;
+    int launchctl_argc = argc - i + 1;
+
+    launchctl_argv = calloc((size_t)launchctl_argc, sizeof(*launchctl_argv));
+    if (!launchctl_argv) {
         return 1;
     }
-
-    /* Run the launchctl command in-process; the serve thread answers. */
-    {
-        char **launchctl_argv;
-        int launchctl_argc = argc - i + 1;
-
-        launchctl_argv = calloc((size_t)launchctl_argc,
-            sizeof(*launchctl_argv));
-        if (!launchctl_argv) {
-            return 1;
-        }
-        launchctl_argv[0] = (char *)"launchctl";
-        for (int j = 0; j < argc - i; j++) {
-            launchctl_argv[j + 1] = argv[i + j];
-        }
-        rc = launchctl_main(launchctl_argc, launchctl_argv);
-        free(launchctl_argv);
+    launchctl_argv[0] = (char *)"launchctl";
+    for (int j = 0; j < argc - i; j++) {
+        launchctl_argv[j + 1] = argv[i + j];
     }
-
-    g_quit = 1;
-    pthread_join(server_thread, NULL);
+    rc = launchctl_main(launchctl_argc, launchctl_argv);
+    free(launchctl_argv);
 
     mach_port_mod_refs(mach_task_self(), server_port, MACH_PORT_RIGHT_RECEIVE,
         -1);
     mach_port_destruct(mach_task_self(), server_port, 0, 0);
+
     return rc;
 }

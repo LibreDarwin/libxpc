@@ -34,7 +34,18 @@
 
 #include <mach/mach.h>
 
-struct _xpc_pipe_s { mach_port_t port; uint64_t flags; bool valid; };
+struct _xpc_pipe_s {
+    mach_port_t port;
+    uint64_t    flags;
+    bool        valid;
+    bool        local; /* receive right in THIS task: stub bridge target */
+};
+
+static xpc_local_routine_handler_t g_local_handler;
+
+void xpc_pipe_set_local_handler(xpc_local_routine_handler_t handler) {
+    g_local_handler = handler;
+}
 
 /* Receive options: deliver a full audit trailer so routine replies can be
  * verified to originate from launchd (PID 1, euid 0). */
@@ -52,10 +63,11 @@ typedef struct {
     vm_address_t ool_addr;
     vm_size_t    ool_len;
     boolean_t    ool_deallocate;
-    mach_port_t *ports;         /* send rights from an OOL_PORTS descriptor */
+    mach_port_t *ports;         /* send rights from a ports descriptor */
     mach_msg_size_t nports;
     vm_size_t    ports_len;     /* region length, when deallocating */
     boolean_t    ports_deallocate;
+    boolean_t    ports_heap;    /* heap array (realloc) instead of OOL region */
 } xpc_pipe_reply_t;
 
 static int pipe_reply_payload(mach_msg_header_t *msg, xpc_pipe_reply_t *out) {
@@ -64,6 +76,7 @@ static int pipe_reply_payload(mach_msg_header_t *msg, xpc_pipe_reply_t *out) {
     out->ool_addr = 0; out->ool_len = 0; out->ool_deallocate = false;
     out->ports = NULL; out->nports = 0; out->ports_len = 0;
     out->ports_deallocate = false;
+    out->ports_heap = false;
     if (!(msg->msgh_bits & MACH_MSGH_BITS_COMPLEX)) return KERN_SUCCESS;
     mach_msg_body_t *body = (mach_msg_body_t *)(void *)((uint8_t *)msg + 24);
     mach_msg_descriptor_t *d =
@@ -89,15 +102,38 @@ static int pipe_reply_payload(mach_msg_header_t *msg, xpc_pipe_reply_t *out) {
                 sizeof(mach_port_name_t);
             out->ports_deallocate = d->ool_ports.deallocate;
             break;
+        case MACH_MSG_PORT_DESCRIPTOR: {
+            /* Send right carried inline as a port descriptor (type 0,
+             * what real launchctl emits in requests and launchd echoes
+             * back in some replies).  Slot it into the same table the
+             * deserializer indexes into. */
+            mach_port_name_t *np;
+            mach_msg_size_t n = out->nports + 1;
+            np = realloc(out->ports, (size_t)n * sizeof(mach_port_name_t));
+            if (!np) return KERN_FAILURE;
+            out->ports = np;
+            out->ports[n - 1] = d->port.name;
+            out->nports = n;
+            out->ports_len = out->nports * sizeof(mach_port_name_t);
+            /* Port-descriptor rights are heap-copied above, not an OOL
+             * region, so never vm_deallocate them. */
+            out->ports_deallocate = false;
+            out->ports_heap = true;
+            break;
+        }
         case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
             /* Same 16-byte descriptor footprint on LP64. */
             break;
         default:
             break;
         }
-        d = (mach_msg_descriptor_t *)(void *)((uint8_t *)d +
-            sizeof(mach_msg_descriptor_t));
-        inline_off += sizeof(mach_msg_descriptor_t);
+        /* Advance by the descriptor's actual footprint: OOL variants are
+         * 16 bytes on LP64, port descriptors 12. */
+        size_t dsize = (d->out_of_line.type == MACH_MSG_PORT_DESCRIPTOR)
+            ? sizeof(mach_msg_port_descriptor_t)
+            : sizeof(mach_msg_descriptor_t);
+        d = (mach_msg_descriptor_t *)(void *)((uint8_t *)d + dsize);
+        inline_off += dsize;
     }
     /* Complex but inline: the serialized object follows the descriptors. */
     if (!out->ool_len && inline_off < msg->msgh_size) {
@@ -111,7 +147,14 @@ static int pipe_reply_payload(mach_msg_header_t *msg, xpc_pipe_reply_t *out) {
 
 xpc_pipe_t xpc_pipe_create_from_port(mach_port_t port, uint64_t flags) {
     xpc_pipe_t p = calloc(1, sizeof(*p));
-    if (p) { p->port = port; p->flags = flags; p->valid = true; }
+    if (p) {
+        p->port = port; p->flags = flags; p->valid = true;
+        mach_port_type_t t = 0;
+        if (mach_port_type(mach_task_self(), port, &t) == KERN_SUCCESS &&
+            (t & MACH_PORT_TYPE_RECEIVE)) {
+            p->local = true; /* the stub bridge terminates here */
+        }
+    }
     return p;
 }
 
@@ -129,6 +172,50 @@ static int send(xpc_pipe_t p, xpc_object_t object, xpc_object_t *reply,
     uint8_t *bytes = xpc_wire_serialize(object, message_id, &length);
     if (!bytes) return KERN_INVALID_ARGUMENT;
     mach_msg_header_t *message = (mach_msg_header_t *)(void *)bytes;
+
+    /* Same-task stub bridge: dispatch the serialized message through the
+     * registered handler instead of mach_msg (see xpc_internal.h). */
+    if (p->local && g_local_handler) {
+        size_t rlen = 0;
+        uint8_t *reply_bytes = g_local_handler(bytes, length, message_id,
+            &rlen);
+        free(bytes);
+        if (reply) *reply = NULL;
+        if (!reply_bytes) return KERN_FAILURE;
+        if (reply) {
+            xpc_pipe_reply_t pl;
+            mach_msg_header_t *rh =
+                (mach_msg_header_t *)(void *)reply_bytes;
+            if (pipe_reply_payload(rh, &pl) != KERN_SUCCESS) {
+                free(reply_bytes);
+                return KERN_INVALID_ARGUMENT;
+            }
+            *reply = xpc_wire_deserialize_with_ports(pl.bytes, pl.len,
+                pl.ports, pl.nports);
+            if (pl.ool_addr && pl.ool_deallocate) {
+                vm_deallocate(mach_task_self(), pl.ool_addr, pl.ool_len);
+            }
+            if (pl.ports && pl.ports_deallocate) {
+                vm_deallocate(mach_task_self(),
+                    (vm_address_t)(uintptr_t)pl.ports, pl.ports_len);
+            } else if (pl.ports && pl.ports_heap) {
+                free(pl.ports);
+            }
+            /* The stub answers inline, so reply_bytes owns no OOL region;
+             * release the message buffer itself. */
+            free(reply_bytes);
+            if (!*reply) {
+                for (mach_msg_size_t i = 0; i < pl.nports; i++) {
+                    mach_port_deallocate(mach_task_self(), pl.ports[i]);
+                }
+                return KERN_INVALID_ARGUMENT;
+            }
+        } else {
+            free(reply_bytes);
+        }
+        return KERN_SUCCESS;
+    }
+
     message->msgh_remote_port = p->port;
     message->msgh_local_port = MACH_PORT_NULL;
     /* Keep the COMPLEX bit (set by the serializer when the object graph
@@ -200,6 +287,8 @@ static int send(xpc_pipe_t p, xpc_object_t object, xpc_object_t *reply,
         if (pl.ports && pl.ports_deallocate) {
             vm_deallocate(mach_task_self(), (vm_address_t)(uintptr_t)pl.ports,
                 pl.ports_len);
+        } else if (pl.ports && pl.ports_heap) {
+            free(pl.ports);
         }
         if (!*reply) {
             /* Deserialization failed: the send rights we were granted are

@@ -308,10 +308,23 @@ The envelope/dict encoding is otherwise identical to the classic form.
 **This validates the reverse-engineered constant table**: our
 `XPC_ROUTINE_LIST = 0x32f` equals the real legacy-list routine, and the real
 `version` uses `0x33c` — the same id as our shmem-state routine family
-(`XPC_ROUTINE_PRINT`), consistent with the real request's `shmem` key. The
-observed `0xd000` (mach send value) and `0xc000` (shmem/OOL) value tags are
-not part of this implementation's serializer (no port/OOL payloads are
-emitted); noted for future interop work.
+(`XPC_ROUTINE_PRINT`), consistent with the real request's `shmem` key.
+
+Two serialization details confirmed against real captures:
+
+- **mach-send values** (`0xd000`) are encoded **tag-only**: the envelope tag
+  keeps the `0xd000` mask and the low byte carries the descriptor index
+  (e.g. `00 d0 00 00` in a descriptor table of 1). The real wire's
+  `domain-port` slot is byte-identical to ours once the per-process port
+  name differs.
+- **bools** occupy 4 bytes (`01 00 00 00`), matching the value-kind family
+  — not a 1-byte slot.
+
+A live round-trip of an *encoded* (serialize → mach-send slot → deserialize)
+complex routine request with `domain-port` now reproduces `probe7` variants
+A–G byte-for-byte against real launchd; the only deltas are the scheduler's
+per-process port names, the voucher port (`0xc03` on real launchd requests),
+and dict key order (irrelevant — CPX@ dict pairs are unordered).
 
 Real launchd demuxes on the msgh_id low bits plus per-routine dict keys
 (no `subsystem` key on modern requests), whereas this implementation's

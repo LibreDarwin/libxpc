@@ -136,8 +136,10 @@ xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj, xpc_porttab_t *pt)
         wbuf_u32(w, XPC_WIRE_NULL);
         break;
     case XPC_KIND_BOOL:
+        /* Payload is 4 bytes: captured system-libxpc messages carry
+         * `legacy=true` as tag 0x2000 followed by `01 00 00 00`. */
         wbuf_u32(w, XPC_WIRE_BOOL);
-        wbuf_u64(w, XPC_CAST(xpc_scalar_t, obj)->v.bval ? 1 : 0);
+        wbuf_u32(w, XPC_CAST(xpc_scalar_t, obj)->v.bval ? 1 : 0);
         break;
     case XPC_KIND_INT64:
         wbuf_u32(w, XPC_WIRE_INT64);
@@ -182,8 +184,11 @@ xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj, xpc_porttab_t *pt)
         xpc_mach_send_t *m = XPC_CAST(xpc_mach_send_t, obj);
         uint32_t idx = pt->nports;
         (void)porttab_add(pt, m->port);
-        wbuf_u32(w, XPC_WIRE_MACH_SEND);
-        wbuf_u64(w, idx);
+        /* Captured system-libxpc messages carry slot values as a bare
+         * type tag with the descriptor index in the tag's low byte
+         * (0xd000 = slot 0, no separate payload). */
+        if (idx > 0xff) return; /* table slots are 8-bit encoded */
+        wbuf_u32(w, XPC_WIRE_MACH_SEND | idx);
         break;
     }
     case XPC_KIND_ARRAY: {
@@ -273,16 +278,18 @@ xpc_wire_serialize(xpc_object_t object, uint32_t msg_id, size_t *out_len)
 
     /*
      * Complex layout when the object graph carries send rights:
-     *   header (24) + body (4) + OOL_PORTS descriptor (16)
-     *   + ports array (4 * nports, mach_port_t is 32-bit on arm64)
+     *   header (24) + msgh_descriptor_count (4)
+     *   + nports * port descriptor (12 each)
      *   + envelope (16) + body.
-     * The descriptor's address points at the inline ports array; the
-     * kernel copies the names (PHYSICAL_COPY), translates each against
-     * our port table, and rebuilds the array in the receiver's space.
+     * Each send right rides as a MACH_MSG_PORT_DESCRIPTOR (type 0) with
+     * the port name inline, exactly like the captured /bin/launchctl
+     * traffic (docs/WIRE_FORMAT.md §11.2).  The dict's mach-send value
+     * (tag 0xd000) references the descriptor by its index in this table.
+     * Launchd destroys the send-once reply right without replying if the
+     * port arrives any other way (e.g. an OOL_PORTS descriptor).
      */
     const size_t nports = pt.nports;
-    const size_t ports_bytes = (size_t)nports * sizeof(mach_port_t);
-    const size_t complex_offset = 24 + 4 + 16 + ports_bytes;
+    const size_t complex_offset = 24 + 4 + 12 * nports;
     const size_t total = (nports ? complex_offset : 24) + 16 + body_len;
 
     if (!wbuf_reserve(&w, total)) {
@@ -308,25 +315,18 @@ xpc_wire_serialize(xpc_object_t object, uint32_t msg_id, size_t *out_len)
     wbuf_u32(&w, msg_id);                   /* msgh_id */
 
     if (nports) {
-        /* msgh_body_t: one descriptor. */
-        wbuf_u32(&w, 1);
-
-        /* mach_msg_ool_ports_descriptor_t (16B on LP64):
-         * address(8) + deallocate/copy/disposition/type(1 each) + count(4).
-         * address points at the ports array below (physical copy; safe
-         * because the whole message buffer is freed right after send). */
-        mach_msg_ool_ports_descriptor_t desc;
-        memset(&desc, 0, sizeof desc);
-        desc.address = (void *)(w.base + w.len + 16);
-        desc.deallocate = 0;
-        desc.copy = MACH_MSG_PHYSICAL_COPY;         /* 0 */
-        desc.disposition = MACH_MSG_TYPE_COPY_SEND; /* 0x13 */
-        desc.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;  /* 2 */
-        desc.count = (mach_msg_size_t)nports;
-        wbuf_write(&w, &desc, sizeof desc);
-
-        /* Inline port-name array (the descriptor references it). */
-        wbuf_write(&w, pt.ports, ports_bytes);
+        /* msgh_body_t: descriptor count, then one port descriptor per
+         * send right.  mach_msg_port_descriptor_t (12B on LP64):
+         * name(4) + pad1(4) + pad2(2) + disposition(1) + type(1). */
+        wbuf_u32(&w, (uint32_t)nports);
+        for (size_t i = 0; i < nports; i++) {
+            mach_msg_port_descriptor_t desc;
+            memset(&desc, 0, sizeof desc);
+            desc.name = pt.ports[i];
+            desc.disposition = MACH_MSG_TYPE_COPY_SEND; /* 0x13 */
+            desc.type = MACH_MSG_PORT_DESCRIPTOR;       /* 0x00 */
+            wbuf_write(&w, &desc, sizeof desc);
+        }
     } else {
         /* msgh_body_t absent for simple messages. */
     }

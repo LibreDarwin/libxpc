@@ -21,5 +21,8 @@ tools/probe/probe2
 tools/probe/probe3
 tools/probe/probe4
 tools/probe/probe4b
+tools/probe/probe6
+tools/probe/probe7
+tools/probe/probe8
 tools/wiredecode/wiredecode
 build/

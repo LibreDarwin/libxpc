@@ -228,7 +228,8 @@ enum {
     XPC_WIRE_DATA   = 0x8000,
     XPC_WIRE_STRING = 0x9000,
     XPC_WIRE_UUID   = 0xa000,
-    XPC_WIRE_MACH_SEND = 0x6000,
+    XPC_WIRE_SHMEM  = 0xc000,   /* shared-memory region (launchd v7 uses for version replies) */
+    XPC_WIRE_MACH_SEND = 0xd000, /* mach send right; value = index into port-descriptor table */
     XPC_WIRE_ARRAY  = 0xe000,
     XPC_WIRE_DICT   = 0xf000,
 };
@@ -284,6 +285,21 @@ int xpc_pipe_routine(xpc_pipe_t pipe, xpc_object_t obj,
 int xpc_pipe_routine_with_flags(xpc_pipe_t pipe, xpc_object_t obj,
     xpc_object_t *reply, uint64_t flags, uint32_t routine);
 int xpc_pipe_invalidate(xpc_pipe_t pipe);
+
+/*
+ * Same-task bridge for the launchd stub (launchd_stub.c).  A Mach reply
+ * port's send-once right is invisible to the receiver when client and
+ * server share one task (receive clobbers msgh_local_port with the
+ * received-on port name), so routine requests to a local destination are
+ * dispatched through this hook instead of mach_msg.  The wire round-trip
+ * (serialize -> descriptor walk -> deserialize -> handle -> serialize
+ * reply -> reply walk -> deserialize) is fully preserved; only the port
+ * hop is skipped.  The handler receives the complete serialized request
+ * message and returns a complete serialized reply message.
+ */
+typedef uint8_t *(*xpc_local_routine_handler_t)(const uint8_t *msg,
+    size_t msg_len, uint32_t msgh_id, size_t *reply_len);
+void xpc_pipe_set_local_handler(xpc_local_routine_handler_t handler);
 
 /* Stash the sender's audit token onto a received dictionary. */
 void xpc_dictionary_set_audit_token(xpc_object_t dict,

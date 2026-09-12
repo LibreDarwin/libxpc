@@ -64,9 +64,13 @@ static xpc_object_t read_value(xpc_deser_t *d) {
     xpc_reader_t *r = &d->r;
     uint32_t tag, n; uint64_t q; const uint8_t *p;
     if (!read_u32(r, &tag)) return NULL;
-    switch (tag) {
+    /* Value tags are type<<8; the low byte carries the descriptor-table
+     * slot for port-backed types (0xd000 = mach-send slot 0). */
+    switch (tag & 0xff00) {
     case XPC_WIRE_NULL: return xpc_null_create();
-    case XPC_WIRE_BOOL: if (!read_u64(r, &q)) return NULL; return xpc_bool_create(q != 0);
+    case XPC_WIRE_BOOL: {
+        uint32_t b; if (!read_u32(r, &b)) return NULL; return xpc_bool_create(b != 0);
+    }
     case XPC_WIRE_INT64: if (!read_u64(r, &q)) return NULL; return xpc_int64_create((int64_t)q);
     case XPC_WIRE_UINT64: if (!read_u64(r, &q)) return NULL; return xpc_uint64_create(q);
     case XPC_WIRE_DOUBLE: {
@@ -74,13 +78,16 @@ static xpc_object_t read_value(xpc_deser_t *d) {
     }
     case XPC_WIRE_DATE: if (!read_u64(r, &q)) return NULL; return xpc_date_create((int64_t)q);
     case XPC_WIRE_UUID: if (!read_bytes(r, 16, &p)) return NULL; return xpc_uuid_create(p);
-    case XPC_WIRE_MACH_SEND:
-        /* The wire value is the index into the message's OOL_PORTS
-         * descriptor array.  Without that table the value is
-         * unresolvable, so treat it as malformed input. */
-        if (!read_u64(r, &q)) return NULL;
-        if (!d->ports || q >= d->nports) return NULL;
-        return xpc_mach_send_create_owned(d->ports[q]);
+    case XPC_WIRE_MACH_SEND: {
+        /* Slot value: the tag's low byte is the index into the message's
+         * port table (port descriptors or OOL_PORTS, per §11.2).  A
+         * captured system-libxpc request ends with a bare 0xd000 tag for
+         * slot 0.  Without that table the value is unresolvable, so
+         * treat it as malformed input. */
+        uint32_t idx = tag & 0xff;
+        if (!d->ports || idx >= d->nports) return NULL;
+        return xpc_mach_send_create_owned(d->ports[idx]);
+    }
     case XPC_WIRE_DATA:
         if (!read_u32(r, &n) || !read_bytes(r, n, &p) || !align4(r)) return NULL;
         return xpc_data_create(p, n);
