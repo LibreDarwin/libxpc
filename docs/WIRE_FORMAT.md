@@ -317,6 +317,12 @@ Two serialization details confirmed against real captures:
   (e.g. `00 d0 00 00` in a descriptor table of 1). The real wire's
   `domain-port` slot is byte-identical to ours once the per-process port
   name differs.
+- **shmem values** (`0xc000`) are **tag + 8-byte size**: captured system
+  messages carry the tag followed by the memory entry's page-aligned size
+  as a LE uint64 (constant `00 40 00 00 00 00 00 00` = 0x4000 — the ARM64
+  16K page — in single-page probes). The serializer emits the size returned
+  by the audited `mach_make_memory_entry_64` in/out parameter; the
+  deserializer requires the field on receive.
 - **bools** occupy 4 bytes (`01 00 00 00`), matching the value-kind family
   — not a 1-byte slot.
 
@@ -346,6 +352,14 @@ launchd writes the version string into the caller's region and replies
 Darwin Bootstrapper Version 7.0.0: Sat Apr 18 19:58:40 PDT 2026;
 root:libxpc_executables-3102.120.13~112/launchd/RELEASE_ARM64E
 ```
+
+This is now reproduced end to end by this tree's own serializer and pipe
+(`tools/probe/probe9.c`): the request's shmem slot is the 12-byte
+tag + page-size value, the reply payload is byte-identical to the real
+library's capture from `{"bytes-written"` onward, and launchd maps our
+memory entry and fills the region. The only remaining deltas are the
+per-process reply-port name and the voucher port (ours sends none;
+launchd accepts the voucher-less form).
 
 **Legacy list (routine `0x32f`)** — the minimal request `{type:1, handle:0}`
 suffices; extra keys are ignored. The reply is a plain dictionary (no OOL,

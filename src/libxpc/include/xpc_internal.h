@@ -75,6 +75,7 @@ typedef enum xpc_kind {
     XPC_KIND_STRING,
     XPC_KIND_UUID,
     XPC_KIND_MACH_SEND,
+    XPC_KIND_SHMEM,
     XPC_KIND_ARRAY,
     XPC_KIND_DICTIONARY,
     XPC_KIND_ERROR,
@@ -149,6 +150,13 @@ typedef struct _xpc_mach_send_s {
                              * (rights received from the wire) */
 } xpc_mach_send_t;
 
+typedef struct _xpc_shmem_s {
+    struct _xpc_object_s hdr;
+    mach_port_t port;       /* memory-entry send right */
+    uint64_t size;          /* page-aligned span of the entry */
+    bool dispose;           /* true: release deallocates the right */
+} xpc_shmem_t;
+
 typedef struct _xpc_array_s {
     struct _xpc_object_s hdr;
     xpc_object_t *items;
@@ -194,6 +202,7 @@ extern const struct _xpc_type_s _xpc_type_data;
 extern const struct _xpc_type_s _xpc_type_string;
 extern const struct _xpc_type_s _xpc_type_uuid;
 extern const struct _xpc_type_s _xpc_type_mach_send;
+extern const struct _xpc_type_s _xpc_type_shmem;
 extern const struct _xpc_type_s _xpc_type_array;
 extern const struct _xpc_type_s _xpc_type_dictionary;
 extern const struct _xpc_type_s _xpc_type_error;
@@ -214,6 +223,19 @@ xpc_object_t xpc_object_alloc_scalar(xpc_type_t t);
  * right; xpc_mach_send_create_owned() takes a received right (COPY_SEND
  * from an OOL_PORTS descriptor) and deallocates it on release. */
 xpc_object_t xpc_mach_send_create_owned(mach_port_t port);
+
+/* Same-task bridge (see xpc_pipe.c): a registered handler answers
+ * serialized routine requests in place of a mach_msg reply hop. */
+typedef uint8_t *(*xpc_local_routine_handler_t)(const uint8_t *msg,
+    size_t msg_len, uint32_t msgh_id, size_t *reply_len);
+void xpc_pipe_set_local_handler(xpc_local_routine_handler_t handler);
+
+/* Shared-memory values (wire kind 0xc000).  xpc_shmem_create maps a
+ * region as a Mach memory entry (launchd v7 maps it and writes the
+ * version string); xpc_shmem_create_owned wraps a memory-entry right
+ * received from the wire and deallocates it on release. */
+xpc_object_t xpc_shmem_create_owned(mach_port_t port, uint64_t size);
+mach_port_t xpc_shmem_get_port(xpc_object_t obj);
 
 #pragma mark - Serialization (xpc_serialize.c)
 

@@ -191,6 +191,19 @@ xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj, xpc_porttab_t *pt)
         wbuf_u32(w, XPC_WIRE_MACH_SEND | idx);
         break;
     }
+    case XPC_KIND_SHMEM: {
+        xpc_shmem_t *s = XPC_CAST(xpc_shmem_t, obj);
+        uint32_t idx = pt->nports;
+        (void)porttab_add(pt, s->port);
+        if (idx > 0xff) return;
+        /* Captured system-libxpc messages carry shmem values as the
+         * 0xc000 tag followed by the entry's page-aligned size as a
+         * LE uint64 (probe_routine 0x33c captures; constant 0x4000 in
+         * our 16K-page probes). */
+        wbuf_u32(w, XPC_WIRE_SHMEM | idx);
+        wbuf_u64(w, s->size);
+        break;
+    }
     case XPC_KIND_ARRAY: {
         xpc_array_t *a = XPC_CAST(xpc_array_t, obj);
         xpc_wbuf_t body = {0};

@@ -88,6 +88,10 @@ static int pipe_reply_payload(mach_msg_header_t *msg, xpc_pipe_reply_t *out) {
             /* First OOL payload wins; keep scanning for a ports
              * descriptor that may follow it. */
             if (!out->ool_len) {
+                if (getenv("XPC_DEBUG")) {
+                    fprintf(stderr, "[pipe] reply payload via OOL desc "
+                        "(size=%u)\n", d->out_of_line.size);
+                }
                 out->bytes = d->out_of_line.address;
                 out->len = d->out_of_line.size;
                 out->ool_addr = (vm_address_t)(uintptr_t)d->out_of_line.address;

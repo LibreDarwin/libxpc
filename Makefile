@@ -16,12 +16,14 @@ FRAMEWORK := $(RELEASE)/XPC.framework
 INCLUDES  := -I$(CURDIR)/src/libxpc/include \
              -I$(shell xcrun --show-sdk-path 2>/dev/null)/usr/include
 DEFINES   := -DMACOSX -DDARWIN64 -DDARWIN -DBUILD_DARWIN
-CFLAGS    := -std=c11 -fblocks -g -O0 -Wall -Wextra -Werror $(INCLUDES) $(DEFINES)
+CFLAGS    := -std=c11 -fblocks -g -O0 -Wall -Wextra -Werror \
+             -MMD -MP $(INCLUDES) $(DEFINES)
 LDFLAGS   := -dynamiclib -install_name @rpath/libxpc.dylib
 
 LIB_SRCS  := $(sort $(wildcard src/libxpc/object/*.c src/libxpc/wire/*.c \
                        src/libxpc/pipe/*.c src/libxpc/connection/*.c))
 OBJS      := $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(LIB_SRCS)))
+DEPFILES  := $(OBJS:.o=.d)
 
 vpath %.c src/libxpc/object src/libxpc/wire src/libxpc/pipe src/libxpc/connection
 
@@ -78,3 +80,5 @@ release: $(FRAMEWORK)
 
 clean:
 	$(RM) $(BUILD)
+
+-include $(DEPFILES)

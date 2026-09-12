@@ -88,6 +88,17 @@ static xpc_object_t read_value(xpc_deser_t *d) {
         if (!d->ports || idx >= d->nports) return NULL;
         return xpc_mach_send_create_owned(d->ports[idx]);
     }
+    case XPC_WIRE_SHMEM: {
+        /* Shared-memory value: same slot semantics as mach-send, different
+         * wire kind (0xc000 — memory entry port).  The real serializer
+         * follows the tag with the entry's page-aligned size as uint64;
+         * consume (and require) it on the receive side too. */
+        uint32_t idx = tag & 0xff;
+        if (!d->ports || idx >= d->nports) return NULL;
+        uint64_t sh_size;
+        if (!read_u64(r, &sh_size)) return NULL;
+        return xpc_shmem_create_owned(d->ports[idx], sh_size);
+    }
     case XPC_WIRE_DATA:
         if (!read_u32(r, &n) || !read_bytes(r, n, &p) || !align4(r)) return NULL;
         return xpc_data_create(p, n);
