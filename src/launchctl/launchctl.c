@@ -78,6 +78,7 @@ static int help_cmd(int argc, char **argv);
 static int version_cmd(int argc, char **argv);
 static int print_cmd(int argc, char **argv);
 static int dumpstate_cmd(int argc, char **argv);
+static int status_cmd(int argc, char **argv);
 static int bootstrap_cmd(int argc, char **argv);
 static int service_target_required_error(const char *cmd);
 static int bootout_cmd(int argc, char **argv);
@@ -96,6 +97,8 @@ static const struct command commands[] = {
     { "print", "Print the state of a domain.", "<domain-target>",
       print_cmd },
     { "dumpstate", "Dump the state of launchd.", "", dumpstate_cmd },
+    { "status", "Query the launchd instance (housekeeping probe).", "",
+      status_cmd },
     { "bootstrap", "Bootstraps a domain or a service into a domain.",
       "<domain-target> [service-path ...]", bootstrap_cmd },
     { "bootout", "Tears down a domain or removes a service.",
@@ -672,6 +675,76 @@ out:
     if (request) xpc_release(request);
     if (shmem) xpc_release(shmem);
     if (region) vm_deallocate(mach_task_self(), region, region_len);
+    return error;
+}
+
+/*
+ * launchctl status: the housekeeping probe (XPC_ROUTINE_SERVICE_STATUS,
+ * 0xcf) real launchctl emits before every command — dict {handle,
+ * instance, flags, name, type, targetpid, domain-port}, wire id
+ * 0x400000cf, no subsystem/routine keys.  launchd answers with a status
+ * dict; we surface the banner and state.
+ */
+static int
+status_cmd(int argc, char **argv)
+{
+    struct xpc_global_data *state;
+    xpc_object_t request = NULL;
+    xpc_object_t reply = NULL;
+    uuid_t instance = {0};
+    int error;
+
+    (void)argv;
+    REQUIRE_ARGS(1);
+    state = xpc_global_data();
+    if (!state->xpc_bootstrap_pipe) {
+        fprintf(stderr, "Status failed: no bootstrap pipe\n");
+        return 1;
+    }
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    /* Observed probe fields (WIRE_FORMAT.md §11.2). */
+    xpc_dictionary_set_uint64(request, "handle", 0);
+    xpc_dictionary_set_uint64(request, "type", LAUNCHCTL_DOMAIN_SYSTEM);
+    xpc_dictionary_set_uint64(request, "flags", 0);
+    xpc_dictionary_set_uint64(request, "targetpid", 0);
+    xpc_dictionary_set_string(request, "name", "");
+    xpc_dictionary_set_uuid(request, "instance", instance);
+    if (geteuid() != 0) {
+        mach_port_t bootstrap = MACH_PORT_NULL;
+        task_get_bootstrap_port(mach_task_self(), &bootstrap);
+        xpc_dictionary_set_mach_send(request, "domain-port", bootstrap);
+    }
+
+    error = xpc_pipe_routine(state->xpc_bootstrap_pipe, request, &reply,
+        XPC_ROUTINE_SERVICE_STATUS);
+    if (error) {
+        fprintf(stderr, "Status failed: %d: %s\n", error,
+            xpc_strerror(error));
+        goto out;
+    }
+    {
+        int64_t rerr = reply ? xpc_dictionary_get_int64(reply, "error") : 0;
+        if (rerr != 0) {
+            fprintf(stderr, "Status failed: %lld: %s\n", (long long)rerr,
+                xpc_strerror((int)rerr));
+            error = (int)rerr;
+            goto out;
+        }
+    }
+    {
+        const char *banner = reply ? xpc_dictionary_get_string(reply,
+            "launchd") : NULL;
+        const char *status = reply ? xpc_dictionary_get_string(reply,
+            "status") : NULL;
+        int64_t pid = reply ? xpc_dictionary_get_int64(reply, "pid") : 0;
+        printf("%s is running (%s, pid %lld)\n",
+            banner ? banner : "launchd", status ? status : "ok",
+            (long long)pid);
+    }
+    error = 0;
+out:
+    if (reply) xpc_release(reply);
+    xpc_release(request);
     return error;
 }
 

@@ -636,6 +636,22 @@ handle_dumpstate(xpc_object_t req, xpc_object_t reply)
     xpc_dictionary_set_uint64(reply, "bytes-written", off);
 }
 
+/*
+ * Canned housekeeping probe reply (SERVICE_STATUS, 0xcf).  Real launchctl
+ * emits this probe — dict {handle, instance, flags, name, type, targetpid,
+ * domain-port}, wire id 0x400000cf, no subsystem/routine keys — before
+ * every command; launchd answers with a status dict.  The stub answers
+ * with a deterministic stand-in carrying the launchd banner.
+ */
+static void
+handle_housekeeping(xpc_object_t req, xpc_object_t reply)
+{
+    (void)req;
+    xpc_dictionary_set_string(reply, "status", "ok");
+    xpc_dictionary_set_int64(reply, "pid", (int64_t)getpid());
+    xpc_dictionary_set_string(reply, "launchd", STUB_VERSION_STRING);
+}
+
 static xpc_object_t
 handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
 {
@@ -648,14 +664,19 @@ handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
     /* Route by msgh_id low 16 bits first, like real launchd's wire
      * dispatcher: the PRINT routine (0x33c) carries its request inline
      * with no subsystem/routine keys — it's identified purely by the
-     * wire id (0x4000033c).  DUMPSTATE (0x342) is the same inline shape
-     * (0x40000342). */
+     * wire id (0x4000033c).  DUMPSTATE (0x342) and the housekeeping
+     * probe (0xcf, launchctl's pre-command preamble) are the same
+     * inline shape (0x40000342 / 0x400000cf). */
     if ((msgh_id & 0xffff) == XPC_ROUTINE_PRINT) {
         handle_print(req, reply);
         return reply;
     }
     if ((msgh_id & 0xffff) == XPC_ROUTINE_DUMPSTATE) {
         handle_dumpstate(req, reply);
+        return reply;
+    }
+    if ((msgh_id & 0xffff) == XPC_ROUTINE_SERVICE_STATUS) {
+        handle_housekeeping(req, reply);
         return reply;
     }
 
