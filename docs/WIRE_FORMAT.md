@@ -302,6 +302,8 @@ The envelope/dict encoding is otherwise identical to the classic form.
 |---------|---------|------------------------------|
 | `launchctl list` (legacy) | `0x4000032f` | handle, type, legacy, domain-port (mach send `0xd000`) |
 | `launchctl version` | `0x4000033c` | handle, shmem (`0xc000`), type, version (bool) |
+| `launchctl print` (domain) | `0x4000033c` | shmem (`0xc000`) only — inline wire id, no subsystem/routine keys |
+| `launchctl dumpstate` | `0x40000342` | shmem (`0xc000`) only — inline wire id (crash-state dump via shmem) |
 | housekeeping probe | `0x400000cf` | handle, instance (uuid), flags, name, type, targetpid, domain-port |
 | reply | `0x20000000` | rec_execcnt, req_pid, port (mach send), plus complex OOL descriptor form for the list payload |
 

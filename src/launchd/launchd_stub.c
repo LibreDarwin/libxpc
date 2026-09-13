@@ -473,7 +473,7 @@ map_print_shmem(xpc_object_t req, xpc_object_t reply, void **region,
 
     if (!shmem || xpc_get_type(shmem) != &_xpc_type_shmem) {
         if (getenv("XPC_DEBUG")) {
-            fprintf(stderr, "[stub] print: no shmem value (obj=%p)\n",
+            fprintf(stderr, "[stub] shmem: no shmem value (obj=%p)\n",
                 (void *)shmem);
         }
         xpc_dictionary_set_int64(reply, "error",
@@ -498,7 +498,7 @@ map_print_shmem(xpc_object_t req, xpc_object_t reply, void **region,
         }
     }
     if (getenv("XPC_DEBUG")) {
-        fprintf(stderr, "[stub] print: mapped %zu bytes at %p\n",
+        fprintf(stderr, "[stub] shmem: mapped %zu bytes at %p\n",
             *region_len, *region);
     }
     return true;
@@ -578,6 +578,64 @@ handle_service_print(xpc_object_t req, xpc_object_t reply)
     xpc_dictionary_set_uint64(reply, "bytes-written", n);
 }
 
+/*
+ * Canned full-state dump for launchctl dumpstate (DUMPSTATE, 0x342).
+ * Same inline wire shape as PRINT — identified purely by msgh_id, the
+ * request carries the "shmem" reply channel.  Real launchd serializes
+ * every domain and service (including crash state) into the region; the
+ * stub writes a deterministic dump in the same shape from g_services,
+ * decoding the wait(3) statuses the same way list/blame do.
+ */
+static void
+handle_dumpstate(xpc_object_t req, xpc_object_t reply)
+{
+    void *region = NULL;
+    size_t region_len = 0;
+    char buf[1024];
+    size_t off = 0;
+    size_t i;
+    int w;
+
+    if (!map_print_shmem(req, reply, &region, &region_len)) {
+        return;
+    }
+    w = snprintf(buf + off, sizeof(buf) - off,
+        "launchd version 7.0.0 (xnuports stub)\n"
+        "system = {\n"
+        "\tactive count = 1\n"
+        "\tpath = /sbin/launchd\n"
+        "\tstate = running\n"
+        "\tservices = {\n");
+    if (w > 0) off += (size_t)w;
+    for (i = 0; i < SERVICE_COUNT && off < sizeof(buf) - 160; i++) {
+        const struct stub_service *s = &g_services[i];
+        if (s->pid != 0) {
+            w = snprintf(buf + off, sizeof(buf) - off,
+                "\t\t%s = { state = running, pid = %lld }\n",
+                s->label, (long long)s->pid);
+        } else if (WIFSIGNALED(s->status)) {
+            w = snprintf(buf + off, sizeof(buf) - off,
+                "\t\t%s = { state = not running, last signal = %d }\n",
+                s->label, WTERMSIG(s->status));
+        } else if (WIFEXITED(s->status)) {
+            w = snprintf(buf + off, sizeof(buf) - off,
+                "\t\t%s = { state = not running, last exit code = %d }\n",
+                s->label, WEXITSTATUS(s->status));
+        } else {
+            w = snprintf(buf + off, sizeof(buf) - off,
+                "\t\t%s = { state = not running }\n", s->label);
+        }
+        if (w > 0) off += (size_t)w;
+    }
+    w = snprintf(buf + off, sizeof(buf) - off, "\t}\n}\n");
+    if (w > 0) off += (size_t)w;
+    if (off + 1 > sizeof(buf)) off = sizeof(buf) - 1; /* cannot truncate */
+    if (off >= region_len) off = region_len - 1;      /* clamp to region */
+    memcpy(region, buf, off);
+    ((char *)region)[off] = '\0';                     /* %s-friendly */
+    xpc_dictionary_set_uint64(reply, "bytes-written", off);
+}
+
 static xpc_object_t
 handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
 {
@@ -590,9 +648,14 @@ handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
     /* Route by msgh_id low 16 bits first, like real launchd's wire
      * dispatcher: the PRINT routine (0x33c) carries its request inline
      * with no subsystem/routine keys — it's identified purely by the
-     * wire id (0x4000033c). */
+     * wire id (0x4000033c).  DUMPSTATE (0x342) is the same inline shape
+     * (0x40000342). */
     if ((msgh_id & 0xffff) == XPC_ROUTINE_PRINT) {
         handle_print(req, reply);
+        return reply;
+    }
+    if ((msgh_id & 0xffff) == XPC_ROUTINE_DUMPSTATE) {
+        handle_dumpstate(req, reply);
         return reply;
     }
 

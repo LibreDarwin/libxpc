@@ -77,6 +77,7 @@ struct command {
 static int help_cmd(int argc, char **argv);
 static int version_cmd(int argc, char **argv);
 static int print_cmd(int argc, char **argv);
+static int dumpstate_cmd(int argc, char **argv);
 static int bootstrap_cmd(int argc, char **argv);
 static int service_target_required_error(const char *cmd);
 static int bootout_cmd(int argc, char **argv);
@@ -94,6 +95,7 @@ static const struct command commands[] = {
     { "version", "Print the version.", "", version_cmd },
     { "print", "Print the state of a domain.", "<domain-target>",
       print_cmd },
+    { "dumpstate", "Dump the state of launchd.", "", dumpstate_cmd },
     { "bootstrap", "Bootstraps a domain or a service into a domain.",
       "<domain-target> [service-path ...]", bootstrap_cmd },
     { "bootout", "Tears down a domain or removes a service.",
@@ -573,6 +575,103 @@ out:
     if (shmem) xpc_release(shmem);
     if (region) vm_deallocate(mach_task_self(), region, region_len);
     free(service_name);
+    return error;
+}
+
+/*
+ * launchctl dumpstate: have launchd write its full runtime state (domains,
+ * services, crash state) into our shmem region, then stream it to stdout.
+ * Same wire shape as the domain print path — XPC_ROUTINE_DUMPSTATE
+ * identified purely by msgh_id, no subsystem/routine keys, request carries
+ * the "shmem" reply channel.  No domain target: launchd dumps everything.
+ */
+static int
+dumpstate_cmd(int argc, char **argv)
+{
+    struct xpc_global_data *state;
+    kern_return_t kr;
+    xpc_object_t request = NULL;
+    xpc_object_t reply = NULL;
+    xpc_object_t shmem = NULL;
+    vm_address_t region = 0;
+    vm_size_t region_len = 0x100000; /* a real dumpstate is large */
+    const char *state_text;
+    int error;
+
+    (void)argv;
+    REQUIRE_ARGS(1);
+    state = xpc_global_data();
+    if (!state->xpc_bootstrap_pipe) {
+        fprintf(stderr, "Dumpstate failed: no bootstrap pipe\n");
+        return 1;
+    }
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    kr = vm_allocate(mach_task_self(), &region, region_len, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        error = kr;
+        goto out;
+    }
+    memset((void *)region, 0, region_len);
+
+    shmem = xpc_shmem_create((void *)region, region_len);
+    if (!shmem) {
+        error = ENOMEM;
+        goto out;
+    }
+    xpc_dictionary_set_value(request, "shmem", shmem);
+
+    error = xpc_pipe_routine(state->xpc_bootstrap_pipe, request, &reply,
+        XPC_ROUTINE_DUMPSTATE);
+    if (error) {
+        fprintf(stderr, "Dumpstate failed: %d: %s\n", error,
+            xpc_strerror(error));
+        goto out;
+    }
+    /* launchd reports dumpstate failures in the reply payload ("error")
+     * while the transport itself succeeds — surface those. */
+    {
+        int64_t rerr = reply ? xpc_dictionary_get_int64(reply, "error") : 0;
+        if (rerr != 0) {
+            fprintf(stderr, "Dumpstate failed: %lld: %s\n", (long long)rerr,
+                xpc_strerror((int)rerr));
+            error = (int)rerr;
+            goto out;
+        }
+    }
+    /*
+     * The dump is written into our region.  Real launchd can fill the
+     * whole region without a trailing NUL when the state exceeds the
+     * span, so never emit the region as a raw %s — it walks off the end
+     * of the mapping.  Prefer the reply's "bytes-written" when present;
+     * otherwise bound the read with strnlen.  A dump that hits the
+     * bound is truncated.
+     */
+    state_text = (const char *)region;
+    if (!state_text[0]) {
+        error = XPC_LAUNCHD_ERROR_BAD_RESPONSE;
+        goto out;
+    }
+    {
+        size_t avail = region_len - 1;
+        size_t n = 0;
+        if (reply) {
+            uint64_t bw = xpc_dictionary_get_uint64(reply, "bytes-written");
+            if (bw && bw < (uint64_t)avail) {
+                n = (size_t)bw;
+            }
+        }
+        if (!n) {
+            n = strnlen(state_text, avail);
+        }
+        fwrite(state_text, 1, n, stdout);
+        fputc('\n', stdout);
+    }
+    error = 0;
+out:
+    if (reply) xpc_release(reply);
+    if (request) xpc_release(request);
+    if (shmem) xpc_release(shmem);
+    if (region) vm_deallocate(mach_task_self(), region, region_len);
     return error;
 }
 
