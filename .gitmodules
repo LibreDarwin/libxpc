@@ -7,3 +7,6 @@
 [submodule "src/apple/launchd"]
 	path = src/apple/launchd
 	url = https://github.com/apple-oss-distributions/launchd
+[submodule "src/apple/libdispatch"]
+	path = src/apple/libdispatch
+	url = https://github.com/apple-oss-distributions/libdispatch.git
