@@ -65,6 +65,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* Provided by src/launchctl/launchctl.c when compiled with XNUXPORTS_EMBED. */
@@ -412,6 +413,37 @@ handle_kickstart(xpc_object_t req, xpc_object_t reply)
 }
 
 /*
+ * Canned blame for launchctl blame <service-target> (SERVICE_BLAME,
+ * 0x2c3, service subsystem): 0/"No blame" while running (or with no
+ * exit record); the wait(3) status decoded for terminated services.
+ */
+static void
+handle_blame(xpc_object_t req, xpc_object_t reply)
+{
+    const char *name = xpc_dictionary_get_string(req, "name");
+    struct stub_service *s = find_service(name);
+    int64_t blame = 0;
+    const char *blame_text = "No blame";
+
+    if (!s) {
+        xpc_dictionary_set_int64(reply, "error",
+            XPC_LAUNCHD_ERROR_SERVICE_NOT_FOUND);
+        return;
+    }
+    if (s->pid == 0 && s->status != 0) {
+        if (WIFSIGNALED(s->status)) {
+            blame = WTERMSIG(s->status);
+            blame_text = "Killed by signal";
+        } else if (WIFEXITED(s->status)) {
+            blame = WEXITSTATUS(s->status);
+            blame_text = "Exited with code";
+        }
+    }
+    xpc_dictionary_set_int64(reply, "blame", blame);
+    xpc_dictionary_set_string(reply, "blame-text", blame_text);
+}
+
+/*
  * Map the request's shmem value (the PRINT reply channel) into this
  * task.  Returns true on success; on failure stamps the reply's "error"
  * with XPC_LAUNCHD_ERROR_BAD_RESPONSE.
@@ -552,6 +584,8 @@ handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
             handle_kickstart(req, reply);
         } else if (routine == XPC_ROUTINE_SERVICE_PRINT) {
             handle_service_print(req, reply);
+        } else if (routine == XPC_ROUTINE_SERVICE_BLAME) {
+            handle_blame(req, reply);
         } else {
             xpc_dictionary_set_int64(reply, "error",
                 XPC_LAUNCHD_ERROR_REQUEST_UNSUPPORTED);

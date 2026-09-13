@@ -83,6 +83,7 @@ static int bootout_cmd(int argc, char **argv);
 static int enable_disable_cmd(int argc, char **argv);
 static int kickstart_cmd(int argc, char **argv);
 static int kill_cmd(int argc, char **argv);
+static int blame_cmd(int argc, char **argv);
 static int list_cmd(int argc, char **argv);
 static int getenv_cmd(int argc, char **argv);
 static int setenv_cmd(int argc, char **argv);
@@ -105,6 +106,8 @@ static const struct command commands[] = {
       "[-k] [-p] [-s] <service-target>", kickstart_cmd },
     { "kill", "Sends a signal to the service instance.",
       "<signal-number|signal-name> <service-target>", kill_cmd },
+    { "blame", "Describes what is preventing a service from running.",
+      "<service-target>", blame_cmd },
     { "list", "Lists information about services.", "[service-name]",
       list_cmd },
     { "getenv", "Gets an environment variable from within launchd.",
@@ -142,7 +145,7 @@ parse_service_target(const char *target, xpc_object_t request,
     char **service_name)
 {
     char *target_copy;
-    char *parts[4];
+    char *parts[4] = { NULL, NULL, NULL, NULL };
     char *saveptr = NULL;
     char *token;
     char *endptr;
@@ -835,6 +838,58 @@ kill_cmd(int argc, char **argv)
         } else if (error) {
             fprintf(stderr, "Kill failed: %d: %s\n", error,
                 xpc_strerror(error));
+        }
+    }
+    if (reply) xpc_release(reply);
+    free(service_name);
+    xpc_release(request);
+    return error;
+}
+
+/*
+ * blame: report why a service is prevented from running (or is
+ * crashing).  SERVICE_BLAME (0x2c3) via the service subsystem; launchd
+ * replies with the dominant blame code for the service's current state
+ * and a human-readable description of the reason.
+ */
+static int
+blame_cmd(int argc, char **argv)
+{
+    xpc_object_t request = NULL;
+    xpc_object_t reply = NULL;
+    char *service_name = NULL;
+    const char *blame_text;
+    int64_t blame = 0;
+    int error;
+
+    REQUIRE_ARGS(2);
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    error = parse_service_target(argv[1], request, &service_name);
+    if (error == LAUNCHCTL_STATUS_SERVICE_TARGET_REQUIRED) {
+        xpc_release(request);
+        return service_target_required_error("blame");
+    }
+    if (!error && !service_name) {
+        error = LAUNCHCTL_STATUS_SERVICE_TARGET_REQUIRED;
+    }
+    if (!error) {
+        error = xpc_service_routine(XPC_ROUTINE_SERVICE_BLAME, request,
+            &reply);
+        if (error == XPC_LAUNCHD_ERROR_SERVICE_NOT_FOUND) {
+            print_service_not_found(service_name, request);
+        } else if (error) {
+            fprintf(stderr, "Blame failed: %d: %s\n", error,
+                xpc_strerror(error));
+        } else {
+            blame = xpc_dictionary_get_int64(reply, "blame");
+            blame_text = xpc_dictionary_get_string(reply, "blame-text");
+            if (blame_text) {
+                fprintf(stdout, "blame for service %s = %lld (%s)\n",
+                    service_name, (long long)blame, blame_text);
+            } else {
+                fprintf(stdout, "blame for service %s = %lld\n",
+                    service_name, (long long)blame);
+            }
         }
     }
     if (reply) xpc_release(reply);
