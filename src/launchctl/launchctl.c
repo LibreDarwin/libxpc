@@ -84,6 +84,7 @@ static int enable_disable_cmd(int argc, char **argv);
 static int kickstart_cmd(int argc, char **argv);
 static int kill_cmd(int argc, char **argv);
 static int blame_cmd(int argc, char **argv);
+static int exists_cmd(int argc, char **argv);
 static int list_cmd(int argc, char **argv);
 static int getenv_cmd(int argc, char **argv);
 static int setenv_cmd(int argc, char **argv);
@@ -108,6 +109,8 @@ static const struct command commands[] = {
       "<signal-number|signal-name> <service-target>", kill_cmd },
     { "blame", "Describes what is preventing a service from running.",
       "<service-target>", blame_cmd },
+    { "exists", "Tests whether a service is loaded.", "<service-target>",
+      exists_cmd },
     { "list", "Lists information about services.", "[service-name]",
       list_cmd },
     { "getenv", "Gets an environment variable from within launchd.",
@@ -890,6 +893,46 @@ blame_cmd(int argc, char **argv)
                 fprintf(stdout, "blame for service %s = %lld\n",
                     service_name, (long long)blame);
             }
+        }
+    }
+    if (reply) xpc_release(reply);
+    free(service_name);
+    xpc_release(request);
+    return error;
+}
+
+/*
+ * exists: probe whether a service is loaded in a domain.  SERVICE_EXISTS
+ * (0x2c8) via the service subsystem; the probe is inherently binary, so
+ * success is reported purely via exit status (0 = loaded, 113 = not
+ * found), making it script-friendly like test(1).
+ */
+static int
+exists_cmd(int argc, char **argv)
+{
+    xpc_object_t request = NULL;
+    xpc_object_t reply = NULL;
+    char *service_name = NULL;
+    int error;
+
+    REQUIRE_ARGS(2);
+    request = xpc_dictionary_create(NULL, NULL, 0);
+    error = parse_service_target(argv[1], request, &service_name);
+    if (error == LAUNCHCTL_STATUS_SERVICE_TARGET_REQUIRED) {
+        xpc_release(request);
+        return service_target_required_error("exists");
+    }
+    if (!error && !service_name) {
+        error = LAUNCHCTL_STATUS_SERVICE_TARGET_REQUIRED;
+    }
+    if (!error) {
+        error = xpc_service_routine(XPC_ROUTINE_SERVICE_EXISTS, request,
+            &reply);
+        if (error == XPC_LAUNCHD_ERROR_SERVICE_NOT_FOUND) {
+            print_service_not_found(service_name, request);
+        } else if (error) {
+            fprintf(stderr, "Exists failed: %d: %s\n", error,
+                xpc_strerror(error));
         }
     }
     if (reply) xpc_release(reply);

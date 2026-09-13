@@ -444,6 +444,23 @@ handle_blame(xpc_object_t req, xpc_object_t reply)
 }
 
 /*
+ * Canned exists probe (SERVICE_EXISTS, 0x2c8, service subsystem).
+ * Existence is signalled purely by absence of error: any fixture label
+ * answers "yes", unknown labels answer SERVICE_NOT_FOUND.
+ */
+static void
+handle_exists(xpc_object_t req, xpc_object_t reply)
+{
+    const char *name = xpc_dictionary_get_string(req, "name");
+    struct stub_service *s = find_service(name);
+
+    if (!s) {
+        xpc_dictionary_set_int64(reply, "error",
+            XPC_LAUNCHD_ERROR_SERVICE_NOT_FOUND);
+    }
+}
+
+/*
  * Map the request's shmem value (the PRINT reply channel) into this
  * task.  Returns true on success; on failure stamps the reply's "error"
  * with XPC_LAUNCHD_ERROR_BAD_RESPONSE.
@@ -586,6 +603,8 @@ handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
             handle_service_print(req, reply);
         } else if (routine == XPC_ROUTINE_SERVICE_BLAME) {
             handle_blame(req, reply);
+        } else if (routine == XPC_ROUTINE_SERVICE_EXISTS) {
+            handle_exists(req, reply);
         } else {
             xpc_dictionary_set_int64(reply, "error",
                 XPC_LAUNCHD_ERROR_REQUEST_UNSUPPORTED);
