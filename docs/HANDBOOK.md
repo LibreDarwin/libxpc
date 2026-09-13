@@ -3,9 +3,10 @@
 This tree contains a small, C-based reimplementation of the core XPC object
 model and its inline wire representation. It is intentionally independent of
 Apple's libxpc implementation, and is shaped like Apple's libSystem family:
-the library component lives at `libsystem/xpc/` (producing
+the library component lives at `src/libsystem/xpc/` (producing
 `libsystem_xpc.dylib`), with `launchctl` and the launchd test stub as
-siblings under `src/`.
+siblings under `src/` and the XPC.framework umbrella project at
+`src/XPC.framework/`.
 
 ## Build
 
@@ -28,9 +29,10 @@ libsystem_trace re-export stubs in the SDK. The remaining libSystem-family
 libraries (log, nv, sbuf) have been merged into libSystem on modern Darwin
 and are reached through `-lSystem` when features consume them.
 
-The build uses the public header in `libsystem/xpc/include/xpc.h`, the module
-map in `XPC.framework/Modules`, and the framework metadata in `Resources`.
-The framework binary is a thin dylib whose only load command is an
+The build uses the public header in `src/libsystem/xpc/include/xpc.h`, the
+module map in `src/XPC.framework/Modules`, and the framework metadata in
+`src/XPC.framework/Resources`. The framework binary is a thin dylib whose
+only load command is an
 `LC_REEXPORT_DYLIB` of our `libsystem_xpc.dylib` — the same shape as Apple's
 own XPC.framework, which re-exports the libSystem symbol set.
 
