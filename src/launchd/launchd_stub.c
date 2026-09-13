@@ -411,13 +411,16 @@ handle_kickstart(xpc_object_t req, xpc_object_t reply)
     }
 }
 
-static void
-handle_print(xpc_object_t req, xpc_object_t reply)
+/*
+ * Map the request's shmem value (the PRINT reply channel) into this
+ * task.  Returns true on success; on failure stamps the reply's "error"
+ * with XPC_LAUNCHD_ERROR_BAD_RESPONSE.
+ */
+static bool
+map_print_shmem(xpc_object_t req, xpc_object_t reply, void **region,
+    size_t *region_len)
 {
     xpc_object_t shmem = xpc_dictionary_get_value(req, "shmem");
-    void *region = NULL;
-    size_t region_len = 0;
-    size_t n;
 
     if (!shmem || xpc_get_type(shmem) != &_xpc_type_shmem) {
         if (getenv("XPC_DEBUG")) {
@@ -426,7 +429,7 @@ handle_print(xpc_object_t req, xpc_object_t reply)
         }
         xpc_dictionary_set_int64(reply, "error",
             XPC_LAUNCHD_ERROR_BAD_RESPONSE);
-        return;
+        return false;
     }
     /* The caller maps a region as a Mach memory entry and passes it as a
      * shmem value; launchd maps that entry and writes its version string
@@ -434,7 +437,7 @@ handle_print(xpc_object_t req, xpc_object_t reply)
      * serialize (0xc000 tag + page-aligned size + port descriptor),
      * deserialize-with-port-table, map, write. */
     {
-        int map_kr = xpc_shmem_map(shmem, &region, &region_len);
+        int map_kr = xpc_shmem_map(shmem, region, region_len);
         if (map_kr != KERN_SUCCESS) {
             if (getenv("XPC_DEBUG")) {
                 fprintf(stderr, "[stub] print: shmem_map kr=0x%x "
@@ -442,12 +445,25 @@ handle_print(xpc_object_t req, xpc_object_t reply)
             }
             xpc_dictionary_set_int64(reply, "error",
                 XPC_LAUNCHD_ERROR_BAD_RESPONSE);
-            return;
+            return false;
         }
     }
     if (getenv("XPC_DEBUG")) {
         fprintf(stderr, "[stub] print: mapped %zu bytes at %p\n",
-            region_len, region);
+            *region_len, *region);
+    }
+    return true;
+}
+
+static void
+handle_print(xpc_object_t req, xpc_object_t reply)
+{
+    void *region = NULL;
+    size_t region_len = 0;
+    size_t n;
+
+    if (!map_print_shmem(req, reply, &region, &region_len)) {
+        return;
     }
     if (xpc_dictionary_get_bool(req, "version")) {
         /* Canned banner for launchctl version (PRINT + {"version": true}) —
@@ -484,6 +500,35 @@ handle_print(xpc_object_t req, xpc_object_t reply)
     xpc_dictionary_set_uint64(reply, "bytes-written", n);
 }
 
+/*
+ * Canned per-service state dump for launchctl print <service-target>
+ * (SERVICE_PRINT, 0x2c4, service subsystem).  Same shmem reply channel
+ * as the domain print: the caller maps a region and launchd writes its
+ * dump back into it.
+ */
+static void
+handle_service_print(xpc_object_t req, xpc_object_t reply)
+{
+    void *region = NULL;
+    size_t region_len = 0;
+    const char *name = xpc_dictionary_get_string(req, "name");
+    char buf[256];
+    size_t n;
+
+    if (!map_print_shmem(req, reply, &region, &region_len)) {
+        return;
+    }
+    n = (size_t)snprintf(buf, sizeof(buf),
+        "%s = {\n\tactive count = 1\n\tpath = /usr/bin/true\n"
+        "\tprogram = /usr/bin/true\n\tstate = running\n}\n",
+        name ? name : "(null)");
+    if (n + 1 > sizeof(buf)) n = sizeof(buf) - 1; /* cannot truncate */
+    if (n >= region_len) n = region_len - 1;      /* clamp to region */
+    memcpy(region, buf, n);
+    ((char *)region)[n] = '\0';                   /* %s-friendly */
+    xpc_dictionary_set_uint64(reply, "bytes-written", n);
+}
+
 static xpc_object_t
 handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
 {
@@ -505,6 +550,8 @@ handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
     if (subsystem == XPC_LAUNCHD_SUBSYSTEM_SERVICE) {
         if (routine == XPC_ROUTINE_SERVICE_KICKSTART) {
             handle_kickstart(req, reply);
+        } else if (routine == XPC_ROUTINE_SERVICE_PRINT) {
+            handle_service_print(req, reply);
         } else {
             xpc_dictionary_set_int64(reply, "error",
                 XPC_LAUNCHD_ERROR_REQUEST_UNSUPPORTED);

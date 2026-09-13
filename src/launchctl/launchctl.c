@@ -449,17 +449,18 @@ out:
 }
 
 /*
- * print: dump a domain's runtime state.  Same PRINT transport and reply
- * channel as version (launchd serializes the requested domain's state as
- * text into the caller's shmem region), but target-driven: the request
- * carries the domain's type/handle instead of {"version": true}.  The
- * region is a 256 KB granule: real launchd fills the whole region
+ * print: dump a domain's (or service's) runtime state.  Same PRINT
+ * transport and reply channel as version (launchd serializes the state
+ * as text into the caller's shmem region), but target-driven: the
+ * request carries the domain's type/handle, or a service's
+ * type/handle/name.  Domain targets go through the raw PRINT routine
+ * (0x33c); service targets through the SERVICE_PRINT routine (0x2c4)
+ * via the service subsystem, whose wrapper surfaces payload errors.
+ * The region is a 256 KB granule: real launchd fills the whole region
  * without a trailing NUL when a domain's state exceeds the span, so the
  * dump is emitted with an explicit byte bound (reply "bytes-written"
- * when present, else strnlen), never as a raw %s.  The stub writes a
- * deterministic canned dump in the same shape.  Domain targets only —
- * service-target prints (the per-service state path) are not
- * implemented here.
+ * when present, else strnlen), never as a raw %s.  The stub writes
+ * deterministic canned dumps in the same shape.
  */
 static int
 print_cmd(int argc, char **argv)
@@ -487,12 +488,6 @@ print_cmd(int argc, char **argv)
         xpc_release(request);
         return service_target_required_error("print");
     }
-    if (!error && service_name) {
-        fprintf(stderr, "print: service targets are not supported yet "
-            "(domain targets only)\n");
-        error = LAUNCHCTL_STATUS_UNKNOWN_COMMAND;
-        goto out;
-    }
     kr = vm_allocate(mach_task_self(), &region, region_len, VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS) {
         error = kr;
@@ -507,21 +502,34 @@ print_cmd(int argc, char **argv)
     }
     xpc_dictionary_set_value(request, "shmem", shmem);
 
-    error = xpc_pipe_routine(state->xpc_bootstrap_pipe, request, &reply,
-        XPC_ROUTINE_PRINT);
-    if (error) {
-        fprintf(stderr, "Print failed: %d: %s\n", error, xpc_strerror(error));
-        goto out;
-    }
-    /* launchd reports routine failures in the reply payload ("error")
-     * while the transport itself succeeds — surface those. */
-    {
-        int64_t rerr = reply ? xpc_dictionary_get_int64(reply, "error") : 0;
-        if (rerr != 0) {
-            fprintf(stderr, "Print failed: %lld: %s\n", (long long)rerr,
-                xpc_strerror((int)rerr));
-            error = (int)rerr;
+    if (!error && service_name) {
+        /* Per-service state dump: SERVICE_PRINT via the service
+         * subsystem.  xpc_service_routine sets subsystem/routine and
+         * surfaces payload errors as its return value. */
+        error = xpc_service_routine(XPC_ROUTINE_SERVICE_PRINT, request,
+            &reply);
+        if (error) {
+            fprintf(stderr, "Print failed: %d: %s\n", error,
+                xpc_strerror(error));
             goto out;
+        }
+    } else {
+        error = xpc_pipe_routine(state->xpc_bootstrap_pipe, request, &reply,
+            XPC_ROUTINE_PRINT);
+        if (error) {
+            fprintf(stderr, "Print failed: %d: %s\n", error, xpc_strerror(error));
+            goto out;
+        }
+        /* launchd reports domain-print failures in the reply payload
+         * ("error") while the transport itself succeeds — surface those. */
+        {
+            int64_t rerr = reply ? xpc_dictionary_get_int64(reply, "error") : 0;
+            if (rerr != 0) {
+                fprintf(stderr, "Print failed: %lld: %s\n", (long long)rerr,
+                    xpc_strerror((int)rerr));
+                error = (int)rerr;
+                goto out;
+            }
         }
     }
     /*
