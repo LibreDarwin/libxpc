@@ -14,7 +14,7 @@
  *  region (0x8000) validates that the wire's 8-byte shmem size field
  *  carries the entry's real page-aligned span, not a constant.
  *
- *  Build: cc -o probe9 probe9.c -I../.. -L../../build/release -lxpc \
+ *  Build: cc -o probe9 probe9.c -I../.. -L../../build/release -lsystem_xpc \
  *             -Wl,-rpath,../../build/release
  *  Run:   DYLD_INSERT_LIBRARIES=tools/probe/interpose.dylib ./probe9 [size]
  */

@@ -4,7 +4,7 @@
  * probe7.c -- isolate which request key/encoding makes launchd destroy
  * our send-once reply right (0x47 notification instead of a real reply).
  *
- * Drives OUR libxpc.dylib against the live bootstrap port with variant
+ * Drives OUR libsystem_xpc.dylib against the live bootstrap port with variant
  * legacy-LIST dicts.  A variant that returns a dict is accepted; one that
  * errors 4 (KERN_INVALID_ARGUMENT from our bad-reply-id path) or blocks
  * is the offender.
