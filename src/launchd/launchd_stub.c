@@ -652,6 +652,27 @@ handle_housekeeping(xpc_object_t req, xpc_object_t reply)
     xpc_dictionary_set_string(reply, "launchd", STUB_VERSION_STRING);
 }
 
+/*
+ * Canned debugger-attach grant (SERVICE_ATTACH, 0x2bf, service subsystem).
+ * Real launchd hands the caller debug rights on the target service's task;
+ * the stub stands in with an existence check and confirms the grant, and
+ * answers SERVICE_NOT_FOUND for unknown labels like the other service
+ * routines.
+ */
+static void
+handle_service_attach(xpc_object_t req, xpc_object_t reply)
+{
+    const char *name = xpc_dictionary_get_string(req, "name");
+    struct stub_service *s = find_service(name);
+
+    if (!s) {
+        xpc_dictionary_set_int64(reply, "error",
+            XPC_LAUNCHD_ERROR_SERVICE_NOT_FOUND);
+        return;
+    }
+    xpc_dictionary_set_string(reply, "attached", name ? name : "(null)");
+}
+
 static xpc_object_t
 handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
 {
@@ -683,6 +704,8 @@ handle_request_with_id(xpc_object_t req, uint32_t msgh_id)
     if (subsystem == XPC_LAUNCHD_SUBSYSTEM_SERVICE) {
         if (routine == XPC_ROUTINE_SERVICE_KICKSTART) {
             handle_kickstart(req, reply);
+        } else if (routine == XPC_ROUTINE_SERVICE_ATTACH) {
+            handle_service_attach(req, reply);
         } else if (routine == XPC_ROUTINE_SERVICE_PRINT) {
             handle_service_print(req, reply);
         } else if (routine == XPC_ROUTINE_SERVICE_BLAME) {

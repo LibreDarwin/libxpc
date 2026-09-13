@@ -305,6 +305,7 @@ The envelope/dict encoding is otherwise identical to the classic form.
 | `launchctl print` (domain) | `0x4000033c` | shmem (`0xc000`) only — inline wire id, no subsystem/routine keys |
 | `launchctl dumpstate` | `0x40000342` | shmem (`0xc000`) only — inline wire id (crash-state dump via shmem) |
 | `launchctl status` | `0x400000cf` | handle, instance (uuid), flags, name, type, targetpid, domain-port — the same shape real launchctl emits before every command |
+| `launchctl attach` | `0x400002bf` | service subsystem (`2`), routine `703`, plus the parsed service target (name, type, handle) |
 | housekeeping probe | `0x400000cf` | handle, instance (uuid), flags, name, type, targetpid, domain-port |
 | reply | `0x20000000` | rec_execcnt, req_pid, port (mach send), plus complex OOL descriptor form for the list payload |
 
