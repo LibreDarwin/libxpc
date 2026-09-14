@@ -453,6 +453,47 @@ static void resolve_real2(void)
 	}
 }
 
+/* mincore-guarded dump: never faults on unmapped pages (bounded wire capture). */
+static void emit_guarded(const void *buf, size_t len, const char *tag)
+{
+	if (g_log_fd < 0 || buf == NULL) {
+		return;
+	}
+	uintptr_t base = (uintptr_t)buf;
+	uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+	uintptr_t start_page = base & ~(page - 1);
+	uintptr_t end = base + len - 1;
+	size_t npages = (size_t)((end - start_page) / page) + 1;
+	unsigned char *vec = calloc(npages, 1);
+	if (vec == NULL) {
+		return;
+	}
+	if (mincore((void *)start_page, npages * page, (char *)vec) != 0) {
+		free(vec);
+		return;
+	}
+	char line[128];
+	int n = snprintf(line, sizeof(line), "MSG2 %s @ %p len=%zu\n",
+	    tag, buf, len);
+	write(g_log_fd, line, (size_t)n);
+	for (size_t i = 0; i < len; i += 16) {
+		size_t chunk = len - i < 16 ? len - i : 16;
+		uintptr_t offpage = (base + i) & ~(page - 1);
+		if ((vec[(offpage - start_page) / page] & MINCORE_INCORE) == 0) {
+			break; /* rest is unmapped; stop */
+		}
+		n = snprintf(line, sizeof(line), "%08zx ", i);
+		write(g_log_fd, line, (size_t)n);
+		for (size_t j = 0; j < chunk; j++) {
+			n = snprintf(line, sizeof(line), "%02x ",
+			    ((const unsigned char *)buf)[i + j]);
+			write(g_log_fd, line, (size_t)n);
+		}
+		write(g_log_fd, "\n", 1);
+	}
+	free(vec);
+}
+
 static void log_msg2(const char *tag, void *data, uint64_t option64,
     uint64_t bits_and_send_size, uint64_t remote_and_local_port,
     uint64_t voucher_and_id, uint64_t desc_count_and_rcv_name,
@@ -471,7 +512,33 @@ static void log_msg2(const char *tag, void *data, uint64_t option64,
 	    (unsigned int)(uint32_t)desc_count_and_rcv_name,
 	    (unsigned int)(uint32_t)(desc_count_and_rcv_name >> 32));
 	emit_text(line);
-	emit(hdr, size);
+	/* MSG2: dump the full message region so OOL descriptor addresses
+	 * (which carry the real XPC payloads) are visible: body =
+	 * 28B header + desc_count*16B descriptor array + inline payload. */
+	size_t desc_cnt = (size_t)(uint32_t)desc_count_and_rcv_name;
+	size_t window = (size_t)size + desc_cnt * 16 + 28;
+	if (window > 512) {
+		window = 512;
+	}
+	if (window > size) {
+		emit(hdr, (mach_msg_size_t)window);
+	} else {
+		emit(hdr, size);
+	}
+	/* Bounce form: heap pointers at +0x10 (wire header/desc regions) and
+	 * +0x30 (OOL payload) carry the real XPC payload bytes. Dump both
+	 * mincore-guarded so an odd layout can never crash the process. */
+	if (desc_cnt > 0 && size < 64) {
+		uint64_t p1, p2;
+		memcpy(&p1, (const char *)data + 0x18, sizeof(p1));
+		memcpy(&p2, (const char *)data + 0x30, sizeof(p2));
+		if (p1 != 0) {
+			emit_guarded((const void *)(uintptr_t)p1, 1024, "OOL1");
+		}
+		if (p2 != 0 && p2 != p1) {
+			emit_guarded((const void *)(uintptr_t)p2, 1024, "OOL2");
+		}
+	}
 }
 
 kern_return_t probe_mach_msg2_internal(void *data, uint64_t option64,
@@ -491,7 +558,7 @@ kern_return_t probe_mach_msg2_internal(void *data, uint64_t option64,
 		write(g_log_fd, line, (size_t)n);
 	}
 
-	if (data && (option64 & MACH64_SEND_MSG)) {
+	if (data && ((bits_and_send_size >> 32) != 0)) {
 		log_msg2("SEND", data, option64, bits_and_send_size,
 		    remote_and_local_port, voucher_and_id,
 		    desc_count_and_rcv_name, rcv_size_and_priority);
@@ -526,7 +593,7 @@ kern_return_t probe_mach_msg2_trap(struct msg2_return *ret,
 		write(g_log_fd, line, (size_t)n);
 	}
 
-	if (args->data && (args->options & MACH64_SEND_MSG)) {
+	if (args->data && ((args->msgh_bits_and_send_size >> 32) != 0)) {
 		log_msg2("SEND", args->data, args->options,
 		    args->msgh_bits_and_send_size,
 		    args->msgh_remote_and_local_port,
