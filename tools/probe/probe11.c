@@ -53,8 +53,9 @@
  *
  * The client mode resolves NAME, sends the type corpus, optionally drives
  * a routine-with-reply (sync blocks; async returns immediately and prints
- * via handler), and finally sends an endpoint object wrapping the client
- * connection.  Every mach_msg crossing lands in XPC_PROBE_LOG.
+ * via handler), an endpoint object wrapping the client connection, and
+ * finally a port-bearing message (mach_send right + shmem region).
+ * Every mach_msg crossing lands in XPC_PROBE_LOG.
  */
 
 #include <stdio.h>
@@ -66,6 +67,10 @@
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
 #include <xpc/xpc.h>
+/* xpc_shmem_create is private API; probe10 proves the symbol links from the
+ * system dylib, so declare it locally instead of dragging our in-tree
+ * xpc_private.h into a file that also includes the SDK public header. */
+extern xpc_object_t xpc_shmem_create(void *region, size_t length);
 
 /* ------------------------------------------------------------------ */
 /* The object corpus: every serializable type, nested where it helps.  */
@@ -229,6 +234,34 @@ connect_and_chat(const char *name, bool sync_reply)
 	printf(">>> endpoint object (async)\n");
 	fflush(stdout);
 	xpc_connection_send_message(client, with_ep);
+
+	usleep(300000);
+
+	/* Port-bearing message: a mach send right (bootstrap port) plus a
+	 * shared-memory object.  Capture exercises the wire staging of the
+	 * port descriptor table plus the shmem size field. */
+	{
+		xpc_object_t with_ports = xpc_dictionary_create(NULL, NULL, 0);
+		xpc_dictionary_set_mach_send(with_ports, "boot", bootstrap_port);
+		vm_address_t region = 0;
+		vm_size_t region_len = 0x4000;
+		kern_return_t kr = vm_allocate(mach_task_self(), &region,
+		    region_len, VM_FLAGS_ANYWHERE);
+		if (kr == KERN_SUCCESS) {
+			memset((void *)region, 0, region_len);
+			xpc_object_t shmem = xpc_shmem_create((void *)region,
+			    region_len);
+			if (shmem) {
+				xpc_dictionary_set_value(with_ports, "shm",
+				    shmem);
+				xpc_release(shmem);
+			}
+		}
+		printf(">>> ports message: mach_send + shmem (async)\n");
+		fflush(stdout);
+		xpc_connection_send_message(client, with_ports);
+		xpc_release(with_ports);
+	}
 
 	sleep(1);
 	xpc_connection_cancel(client);

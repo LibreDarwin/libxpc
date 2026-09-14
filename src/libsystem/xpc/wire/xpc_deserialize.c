@@ -64,9 +64,11 @@ static xpc_object_t read_value(xpc_deser_t *d) {
     xpc_reader_t *r = &d->r;
     uint32_t tag, n; uint64_t q; const uint8_t *p;
     if (!read_u32(r, &tag)) return NULL;
-    /* Value tags are type<<8; the low byte carries the descriptor-table
-     * slot for port-backed types (0xd000 = mach-send slot 0). */
-    switch (tag & 0xff00) {
+    /* Type id in bits 8..19, descriptor-table slot in the low byte
+     * (0xd000 = mach-send slot 0; 0x12000 = endpoint slot 0).  Mask
+     * with 0xfff00: 0xff00 would alias the 0x10000+ kinds onto the
+     * scale kinds (0x12000 & 0xff00 == BOOL). */
+    switch (tag & 0xfff00u) {
     case XPC_WIRE_NULL: return xpc_null_create();
     case XPC_WIRE_BOOL: {
         uint32_t b; if (!read_u32(r, &b)) return NULL; return xpc_bool_create(b != 0);
@@ -98,6 +100,14 @@ static xpc_object_t read_value(xpc_deser_t *d) {
         uint64_t sh_size;
         if (!read_u64(r, &sh_size)) return NULL;
         return xpc_shmem_create_owned(d->ports[idx], sh_size);
+    }
+    case XPC_WIRE_ENDPOINT: {
+        /* Endpoint value: zero payload, slot in the tag's low byte
+         * (confirmed by probe11: with_ep dict, `ep` → 0x12000, slot 0).
+         * The port reference rides in the message's descriptor table. */
+        uint32_t idx = tag & 0xff;
+        if (!d->ports || idx >= d->nports) return NULL;
+        return xpc_endpoint_create(d->ports[idx]);
     }
     case XPC_WIRE_DATA:
         if (!read_u32(r, &n) || !read_bytes(r, n, &p) || !align4(r)) return NULL;
@@ -150,13 +160,50 @@ static xpc_object_t read_value(xpc_deser_t *d) {
  * Envelope location:  real launchd sends large replies as an OOL
  * descriptor whose region begins with the naked envelope (magic at
  * offset 0), while small replies arrive inline after the mach header
- * (magic at offset 24).  Return the envelope offset, or -1.
+ * (magic at offset 24).  Complex messages (send rights riding as
+ * descriptors) instead walk header(24) + descriptor_count(4) + the
+ * descriptor table before the envelope.  Return the envelope offset,
+ * or -1.
  */
 static long
 xpc_envelope_offset(const uint8_t *b, size_t len)
 {
     if (len >= 16 && memcmp(b, XPC_WIRE_MAGIC, 4) == 0) return 0;
     if (len >= 40 && memcmp(b + 24, XPC_WIRE_MAGIC, 4) == 0) return 24;
+    if (len >= 40) {
+        const mach_msg_header_t *h = (const mach_msg_header_t *)(void *)b;
+        if (h->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+            /* msgh_body_t at offset 24: descriptor count, then one
+             * descriptor per entry (port descs are 12B, OOL 16B on
+             * LP64).  The envelope follows the last descriptor. */
+            const mach_msg_body_t *mb =
+                (const mach_msg_body_t *)(void *)(b + 24);
+            if (mb->msgh_descriptor_count > 0 &&
+                len >= 28 + (size_t)mb->msgh_descriptor_count * 12) {
+                const uint8_t *dp = b + 28;
+                size_t off = 28;
+                for (mach_msg_size_t i = 0;
+                     i < mb->msgh_descriptor_count; i++) {
+                    /* Port descriptors are 12B with their type byte at
+                     * offset 11; OOL-family are 16B with the type at
+                     * offset 15.  Read the port member (matches Apple's
+                     * receive-side idiom in xpc_pipe). */
+                    mach_msg_port_descriptor_t pd;
+                    memcpy(&pd, dp, sizeof pd);
+                    size_t dsize =
+                        (pd.type == MACH_MSG_PORT_DESCRIPTOR)
+                        ? sizeof(mach_msg_port_descriptor_t)
+                        : sizeof(mach_msg_descriptor_t);
+                    off += dsize;
+                    dp += dsize;
+                    if (off + 16 > len) return -1;
+                }
+                if (memcmp(b + off, XPC_WIRE_MAGIC, 4) == 0) {
+                    return (long)off;
+                }
+            }
+        }
+    }
     return -1;
 }
 

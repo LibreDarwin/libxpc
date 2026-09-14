@@ -55,10 +55,74 @@ int main(void) {
     assert(xpc_dictionary_get_int64(copy, "answer") == 42);
     assert(strcmp(xpc_dictionary_get_string(copy, "text"), "hello") == 0);
     free(wire);
+    xpc_release(copy);
+
+    /* Port-backed value round trip: endpoint (0x12000) and mach-send
+     * (0xd000) must serialize as slot tags, ride in the message's port
+     * descriptor table, and deserialize back to the same kinds —
+     * byte-faithful to the probe11 capture (docs/WIRE_FORMAT.md §11.2). */
+    {
+        mach_port_t right = MACH_PORT_NULL;
+        assert(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+            &right) == KERN_SUCCESS);
+        xpc_object_t ep = xpc_endpoint_create(right);
+        xpc_object_t ms = xpc_mach_send_create(right);
+        assert(ep && ms);
+        xpc_object_t ports_dict = xpc_dictionary_create(NULL, NULL, 0);
+        xpc_dictionary_set_value(ports_dict, "ep", ep);
+        xpc_dictionary_set_value(ports_dict, "right", ms);
+        xpc_release(ep); xpc_release(ms);
+
+        size_t wlen = 0;
+        uint8_t *wwire = xpc_wire_serialize(ports_dict,
+            XPC_PIPE_ID_ROUTINE | 7, &wlen);
+        assert(wwire);
+
+        /* The serialized message must carry the complex descriptor table
+         * and the two slot tags — same layout probe11 captured from the
+         * real system: ep → 0x12000 slot 0, right → 0xd000 slot 1. */
+        mach_msg_header_t *h = (mach_msg_header_t *)(void *)wwire;
+        assert(h->msgh_bits & MACH_MSGH_BITS_COMPLEX);
+        assert(h->msgh_size == wlen);
+
+        /* Walk the descriptors the same way xpc_pipe.c does. */
+        mach_msg_body_t *mb = (mach_msg_body_t *)(void *)(wwire + 24);
+        mach_msg_descriptor_t *dsc = (mach_msg_descriptor_t *)(void *)(mb + 1);
+        mach_port_t ports[4];
+        mach_msg_size_t nports = 0;
+        for (mach_msg_size_t i = 0; i < mb->msgh_descriptor_count; i++) {
+            assert(nports < 4);
+            if (dsc->out_of_line.type == MACH_MSG_PORT_DESCRIPTOR) {
+                ports[nports++] = dsc->port.name;
+                dsc = (mach_msg_descriptor_t *)(void *)
+                    ((uint8_t *)dsc + sizeof(mach_msg_port_descriptor_t));
+            } else {
+                dsc = (mach_msg_descriptor_t *)(void *)
+                    ((uint8_t *)dsc + sizeof(mach_msg_descriptor_t));
+            }
+        }
+        assert(nports == 2 && ports[0] == right && ports[1] == right);
+
+        xpc_object_t back = xpc_wire_deserialize_with_ports(wwire, wlen,
+            ports, nports);
+        assert(back);
+        assert(xpc_get_type(xpc_dictionary_get_value(back, "ep")) ==
+            &_xpc_type_endpoint);
+        assert(xpc_endpoint_get_port(xpc_dictionary_get_value(back, "ep")) ==
+            right);
+        assert(xpc_get_type(xpc_dictionary_get_value(back, "right")) ==
+            &_xpc_type_mach_send);
+        assert(xpc_mach_send_get_port(xpc_dictionary_get_value(back, "right"))
+            == right);
+        xpc_release(back);
+        free(wwire);
+        xpc_release(ports_dict);
+    }
+
     xpc_pipe_t pipe = xpc_pipe_create_from_port(MACH_PORT_NULL, 0);
     assert(pipe);
     assert(xpc_pipe_simpleroutine(pipe, d, NULL) != KERN_SUCCESS);
     assert(xpc_pipe_invalidate(pipe) == KERN_SUCCESS);
-    xpc_release(copy); xpc_release(d);
+    xpc_release(d);
     return 0;
 }

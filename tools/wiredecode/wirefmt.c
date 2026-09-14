@@ -55,6 +55,14 @@ static int64_t rd_i64(wfctx_t *c)
 
 static size_t align4(size_t n) { return (n + 3) & ~3UL; }
 
+/* Canonical tag: type_id << 12.  Port-backed types (mach_send, shmem,
+ * endpoint, …) carry the descriptor-table index in the low byte, so a
+ * value tag is `canonical | idx` (0xd003 = mach_send, slot 3).  The
+ * 0xff00 mask used by the reference deserializer breaks for extended
+ * tags (0x12000 & 0xff00 == 0x2000 == bool), hence 0xfff00 here. */
+static uint32_t tag_base(uint32_t t) { return t & 0xfff00u; }
+static uint32_t tag_idx(uint32_t t) { return t & 0xffu; }
+
 static const char *typname(uint32_t t);
 
 static void emit_indent(FILE *out, int indent)
@@ -102,12 +110,14 @@ static int parse_slot(wfctx_t *c, int indent, FILE *out)
 		return -1;
 	}
 	uint32_t typ = rd_u32(c);
+	uint32_t tb = tag_base(typ);      /* canonical type id */
+	uint32_t idx = tag_idx(typ);      /* descriptor-table slot */
 	size_t val_off = c->off;
 
 	emit_indent(out, indent);
-	fprintf(out, "%s [%s]: ", key, typname(typ));
+	fprintf(out, "%s [%s]: ", key, typname(tb));
 
-	switch (typ) {
+	switch (tb) {
 	case 0x1000:  /* NULL */
 		fputc('\n', out);
 		break;
@@ -235,7 +245,6 @@ static int parse_slot(wfctx_t *c, int indent, FILE *out)
 	}
 
 	case 0xb000:  /* FD — fileport mach port */
-	case 0xd000:  /* MACH_SEND — send right */
 	case 0x11000: /* CONNECTION */
 	case 0x15000: /* MACH_RECV — recv right */
 		/* Layout not yet confirmed empirically — mark as known
@@ -243,18 +252,38 @@ static int parse_slot(wfctx_t *c, int indent, FILE *out)
 		fputc('\n', out);
 		emit_indent(out, indent);
 		fprintf(out, "[!] %s (%#x): value layout not decoded yet — "
-		    "raw tail starts at %zu\n", typname(typ), typ, val_off);
+		    "raw tail starts at %zu\n", typname(tb), tb, val_off);
 		c->errors++;
 		return -1;
 
+	case 0xd000:  { /* MACH_SEND — zero-payload; right rides in the
+	                 * message's port descriptor table.  The tag's low
+	                 * byte is the table slot. */
+		if (idx != 0) {
+			fprintf(out, "(send right, port-table slot %u)\n",
+			    idx);
+		} else {
+			fputs("(send right, port-table slot 0)\n", out);
+		}
+		break;
+	}
+
+	case 0xc000:  { /* SHMEM — memory entry right plus the entry's
+	                 * page-aligned size as a u64 (probe_routine 0x33c
+	                 * captures; launchd v7 version replies). */
+		if (c->off + 8 > c->len) goto short_read;
+		fprintf(out, "(shmem size 0x%llx, port-table slot %u)\n",
+		    (unsigned long long)rd_u64(c), idx);
+		break;
+	}
+
 	case 0x12000: /* ENDPOINT — zero-payload; port ref in msg descriptors */
 	{
-		fputs("(port ref in msg descriptor)\n", out);
+		fprintf(out, "(port ref, msg descriptor slot %u)\n", idx);
 		break;
 	}
 
 	case 0x6000:  /* POINTER — internal, never on the wire */
-	case 0xc000:  /* SHMEM */
 	case 0x10000: /* ERROR */
 	case 0x13000: /* SERIALIZER — internal */
 	case 0x14000: /* PIPE */
@@ -268,7 +297,7 @@ static int parse_slot(wfctx_t *c, int indent, FILE *out)
 		fputc('\n', out);
 		emit_indent(out, indent);
 		fprintf(out, "[!] %s (%#x): value layout not decoded yet — "
-		    "raw tail starts at %zu\n", typname(typ), typ, val_off);
+		    "raw tail starts at %zu\n", typname(tb), tb, val_off);
 		c->errors++;
 		return -1;
 

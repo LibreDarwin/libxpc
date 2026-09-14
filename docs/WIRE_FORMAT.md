@@ -76,8 +76,8 @@ After each aligned key, the value begins with a 4-byte little-endian type tag:
 | `0x9000` | STRING | 4 + N (aligned) | u32 LE byte count + NUL-terminated UTF-8, padded to 4B |
 | `0xa000` | UUID | 16 | Raw 16-byte UUID |
 | `0xb000` | FD | ? | fileport mach port — layout unconfirmed |
-| `0xc000` | SHMEM | ? | shared memory region — layout unconfirmed |
-| `0xd000` | MACH_SEND | ? | send right — layout unconfirmed |
+| `0xc000` | SHMEM | 8 | tag + u64 LE size (confirmed: probe11 ports message) |
+| `0xd000` | MACH_SEND | 0 | **zero-payload**; descriptor slot index in tag low byte (confirmed: probe11 ports message) |
 | `0xe000` | ARRAY | 4 + body_len | u32 LE body length + array body (see §5) |
 | `0xf000` | DICT | 4 + body_len | u32 LE body length + dict body (see §5) |
 | `0x10000` | ERROR | ? | xpc error object — layout unconfirmed |
@@ -339,17 +339,22 @@ The envelope/dict encoding is otherwise identical to the classic form.
 `version` uses `0x33c` — the same id as our shmem-state routine family
 (`XPC_ROUTINE_PRINT`), consistent with the real request's `shmem` key.
 
-Two serialization details confirmed against real captures:
+Serialization details confirmed against real captures:
 
 - **mach-send values** (`0xd000`) are encoded **tag-only**: the envelope tag
-  keeps the `0xd000` mask and the low byte carries the descriptor index
-  (e.g. `00 d0 00 00` in a descriptor table of 1). The real wire's
-  `domain-port` slot is byte-identical to ours once the per-process port
-  name differs.
-- **shmem values** (`0xc000`) are **tag + 8-byte size**: captured system
-  messages carry the tag followed by the memory entry's page-aligned size
-  as a LE uint64 (constant `00 40 00 00 00 00 00 00` = 0x4000 — the ARM64
-  16K page — in single-page probes). The serializer emits the size returned
+  keeps the `0xd000` mask and the low byte carries the descriptor-table slot
+  (e.g. `00 d0 00 00` = slot 0; `03 d0 00 00` would be slot 3).  probe11's
+  ports message (`boot` → bootstrap_port) reproduces this byte-for-byte:
+  `00 d0 00 00`, zero payload, right carried by a port descriptor in the
+  msgh body.  The real wire's `domain-port` slot is byte-identical to ours
+  once the per-process port name differs.
+- **shmem values** (`0xc000`) are **tag + 8-byte size**: the tag is followed
+  by the memory entry's page-aligned size as a LE uint64.  probe11's ports
+  message (`shm` → `xpc_shmem_create(region, 0x4000)`) captures
+  `00 c0 00 00 00 40 00 00 00 00 00 00` — tag then 0x4000, exactly the
+  region length requested.  Single-page probes against the system show the
+  constant ARM64 16K page (`0x4000`) in the same field.  The serializer
+  emits the size returned
   by the audited `mach_make_memory_entry_64` in/out parameter; the
   deserializer requires the field on receive.
 - **bools** occupy 4 bytes (`01 00 00 00`), matching the value-kind family
@@ -366,6 +371,32 @@ Real launchd demuxes on the msgh_id low bits plus per-routine dict keys
 stub dispatches on the dict `"subsystem"`/`"routine"` keys — both dialects
 are internally consistent, and this tree's wire is the classic
 `xpc_pipe_routine` form the system library itself emits.
+
+**Library fidelity** — this tree's own serializer/deserializer now emits
+and consumes the confirmed layouts above byte-for-byte:
+
+- **Wire-kind table**: `xpc_internal.h` carries the full kind set
+  (`0xb000` fd … `0x1a000` file-transfer) with the tag-anatomy rule: kind
+  in bits 8–19, descriptor-slot index in the low byte.  Decoders mask with
+  `0xfff00` — a `0xff00` mask aliases `0x12000` (endpoint) onto `0x2000`
+  (bool) and misroutes port-backed kinds.
+- **Serializer**: `xpc_serialize.c` dissolves an endpoint value into
+  `tag 0x12000 | slot` plus a `MACH_MSG_PORT_DESCRIPTOR` in the msgh body —
+  the same shape probe11 captured (`0x12000` zero-payload, slot byte;
+  shmem as `0xc000` tag + LE u64 size; mach-send as bare `0xd000|slot`).
+  The old fallback — `0x6000` uint64 + bare port number — is gone;
+  connection values (`0x11000`, layout unconfirmed) degrade to `0x3000`
+  null rather than fabricate a layout.
+- **Deserializer**: `xpc_deserialize.c` resolves port-backed tags through
+  the msgh descriptor table (slot → port name), and the envelope locator
+  now walks complex messages — header(24) + descriptor-count(4) + the
+  descriptor table (12-byte port descs, 16-byte OOL) — before looking for
+  `CPX@`, fixing round-trips of messages that carry send rights.
+- **Evidence**: `tests/test_core.c` round-trips an
+  `endpoint + mach_send` dict through serialize → complex mach message →
+  deserialize-with-ports; the port table holds both rights (slot 0 =
+  endpoint's right, slot 1 = mach-send's right) and both decode to the
+  expected types with the original port names.
 
 ### 11.3 Live round-trips against real launchd (probe_routine)
 

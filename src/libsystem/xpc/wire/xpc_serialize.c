@@ -232,16 +232,29 @@ xpc_serialize_value(xpc_wbuf_t *w, xpc_object_t obj, xpc_porttab_t *pt)
         break;
     }
     default:
-        if (obj->isa == &_xpc_type_endpoint ||
-            obj->isa == &_xpc_type_connection) {
-            wbuf_u32(w, XPC_WIRE_UINT64);
-            wbuf_u64(w, (uint64_t)(uintptr_t)
-                XPC_CAST(xpc_endpoint_t, obj)->port);
-        } else {
-            /* Unserializable (error/activity/session/listener):
-             * emit null so the transport never throws. */
-            wbuf_u32(w, XPC_WIRE_NULL);
+        if (obj->isa == &_xpc_type_endpoint) {
+            /* Endpoint: zero-payload, port ref in the message's
+             * descriptor table, slot encoded in the tag's low byte.
+             * Captured probe11 with_ep message: `ep` → 00 20 01 00
+             * (tag 0x12000, slot 0) with a single port descriptor. */
+            uint32_t idx = pt->nports;
+            if (!porttab_add(pt, XPC_CAST(xpc_endpoint_t, obj)->port))
+                break;
+            if (idx > 0xff) break;  /* table slots are 8-bit encoded */
+            wbuf_u32(w, XPC_WIRE_ENDPOINT | idx);
+            break;
         }
+        if (obj->isa == &_xpc_type_connection) {
+            /* Connection values (wire kind 0x11000) have not yet been
+             * captured against the real system — layout unconfirmed.
+             * Until probe evidence exists, degrade to null so the
+             * transport never fabricates bytes Apple would not emit. */
+            wbuf_u32(w, XPC_WIRE_NULL);
+            break;
+        }
+        /* Unserializable (error/activity/session/listener):
+         * emit null so the transport never throws. */
+        wbuf_u32(w, XPC_WIRE_NULL);
         break;
     }
 }

@@ -246,7 +246,14 @@ mach_port_t xpc_shmem_get_port(xpc_object_t obj);
 
 #pragma mark - Serialization (xpc_serialize.c)
 
-/* Type tags as they appear on the wire.  (docs/WIRE_FORMAT.md §4) */
+/* Type tags as they appear on the wire.  (docs/WIRE_FORMAT.md §4)
+ *
+ * Tag anatomy (confirmed by probe11 against real bytes): the type id
+ * occupies bits 8..19 and the LOW BYTE carries the index into the
+ * message's port-descriptor table for port-backed kinds (0xc000, 0xd000,
+ * 0x11000, 0x12000, 0x15000).  Decoders must mask with 0xfff00, never
+ * 0xff00 — the higher kinds (0x10000+) would otherwise alias the scale
+ * kinds (0x12000 & 0xff00 == 0x2000 BOOL). */
 enum {
     XPC_WIRE_NULL   = 0x1000,
     XPC_WIRE_BOOL   = 0x2000,
@@ -257,10 +264,22 @@ enum {
     XPC_WIRE_DATA   = 0x8000,
     XPC_WIRE_STRING = 0x9000,
     XPC_WIRE_UUID   = 0xa000,
-    XPC_WIRE_SHMEM  = 0xc000,   /* shared-memory region (launchd v7 uses for version replies) */
-    XPC_WIRE_MACH_SEND = 0xd000, /* mach send right; value = index into port-descriptor table */
+    XPC_WIRE_FD     = 0xb000,   /* fileport mach port */
+    XPC_WIRE_SHMEM  = 0xc000,   /* memory-entry port; tag + u64 size (confirmed) */
+    XPC_WIRE_MACH_SEND = 0xd000, /* send right; tag only, slot in low byte (confirmed) */
     XPC_WIRE_ARRAY  = 0xe000,
     XPC_WIRE_DICT   = 0xf000,
+    XPC_WIRE_ERROR      = 0x10000,
+    XPC_WIRE_CONNECTION = 0x11000, /* port-backed; layout unconfirmed (no capture) */
+    XPC_WIRE_ENDPOINT   = 0x12000, /* port-backed; zero payload, slot in low byte (confirmed) */
+    XPC_WIRE_SERIALIZER = 0x13000, /* internal */
+    XPC_WIRE_PIPE       = 0x14000,
+    XPC_WIRE_MACH_RECV  = 0x15000, /* receive right; layout unconfirmed (no capture) */
+    XPC_WIRE_BUNDLE     = 0x16000,
+    XPC_WIRE_SERVICE    = 0x17000,
+    XPC_WIRE_SERVICE_INSTANCE = 0x18000,
+    XPC_WIRE_ACTIVITY   = 0x19000,
+    XPC_WIRE_FILE_TRANSFER = 0x1a000,
 };
 
 /*
