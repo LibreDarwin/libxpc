@@ -70,12 +70,37 @@ After each aligned key, the value begins with a 4-byte little-endian type tag:
 | `0x3000` | INT64 | 8 | i64 LE |
 | `0x4000` | UINT64 | 8 | u64 LE |
 | `0x5000` | DOUBLE | 8 | f64 LE (IEEE 754) |
+| `0x6000` | POINTER | ? | internal — not expected on the wire |
 | `0x7000` | DATE | 8 | i64 LE (nanoseconds, typically epoch-anchored) |
 | `0x8000` | DATA | 4 + N (aligned) | u32 LE byte count + raw bytes, padded to 4B |
 | `0x9000` | STRING | 4 + N (aligned) | u32 LE byte count + NUL-terminated UTF-8, padded to 4B |
 | `0xa000` | UUID | 16 | Raw 16-byte UUID |
+| `0xb000` | FD | ? | fileport mach port — layout unconfirmed |
+| `0xc000` | SHMEM | ? | shared memory region — layout unconfirmed |
+| `0xd000` | MACH_SEND | ? | send right — layout unconfirmed |
 | `0xe000` | ARRAY | 4 + body_len | u32 LE body length + array body (see §5) |
 | `0xf000` | DICT | 4 + body_len | u32 LE body length + dict body (see §5) |
+| `0x10000` | ERROR | ? | xpc error object — layout unconfirmed |
+| `0x11000` | CONNECTION | ? | connection — layout unconfirmed |
+| `0x12000` | ENDPOINT | 0 | **zero-payload**: port reference rides in the enclosing mach_msg's port descriptors (confirmed empirically) |
+| `0x13000` | SERIALIZER | ? | internal — not expected on the wire |
+| `0x14000` | PIPE | ? | xpc pipe — layout unconfirmed |
+| `0x15000` | MACH_RECV | ? | receive right — layout unconfirmed |
+| `0x16000` | BUNDLE | ? | bundle — layout unconfirmed |
+| `0x17000` | SERVICE | ? | service — layout unconfirmed |
+| `0x18000` | SERVICE_INSTANCE | ? | service instance — layout unconfirmed |
+| `0x19000` | ACTIVITY | ? | activity — layout unconfirmed |
+| `0x1a000` | FILE_TRANSFER | ? | file transfer — layout unconfirmed |
+
+The tag is `type_id << 12` where `type_id` runs 0x1..0x1a: `0x1` = null,
+`0x2` = bool, `0x3` = int64, … `0xf` = dict, `0x10`+ = extended types.
+`0x12000` = **XPC_ENDPOINT** (type_id 0x12): an `xpc_endpoint_t` serialized
+into a message — the object itself contributes zero bytes to the OOL blob,
+because the endpoint's mach port is delivered via the message's port
+descriptors (`MACH_MSG_PORT_DESCRIPTOR` entries in the msgh body). This
+matches `xpc_dictionary_set_value(d, "ep", xpc_endpoint_create(conn))` when
+the connection is a pure client handle with no live kernel port reference —
+the descriptor slot then carries `MACH_PORT_NULL`.
 
 ### Padding Rules
 
