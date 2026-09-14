@@ -74,6 +74,7 @@
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach/message.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -453,45 +454,124 @@ static void resolve_real2(void)
 	}
 }
 
-/* mincore-guarded dump: never faults on unmapped pages (bounded wire capture). */
+/* Kernel-copy read: mach_vm_read_overwrite never faults the process; an
+ * unmapped or PROT_NONE page simply returns an error. Used for every read
+ * of captured pointer targets. */
+static int safe_read(const void *p, void *out, size_t len)
+{
+	if (p == NULL || out == NULL || len == 0) {
+		return -1;
+	}
+	mach_vm_size_t sz = len;
+	kern_return_t kr = mach_vm_read_overwrite(mach_task_self(),
+	    (mach_vm_address_t)(uintptr_t)p, len,
+	    (vm_offset_t)(uintptr_t)out, &sz);
+	return (kr == KERN_SUCCESS && sz == len) ? 0 : -1;
+}
+
+/* Kernel-copy dump: reads via mach_vm_read_overwrite so an unmapped or
+ * PROT_NONE region yields KERN_* (skipped) instead of a process fault. */
 static void emit_guarded(const void *buf, size_t len, const char *tag)
 {
-	if (g_log_fd < 0 || buf == NULL) {
-		return;
-	}
-	uintptr_t base = (uintptr_t)buf;
-	uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
-	uintptr_t start_page = base & ~(page - 1);
-	uintptr_t end = base + len - 1;
-	size_t npages = (size_t)((end - start_page) / page) + 1;
-	unsigned char *vec = calloc(npages, 1);
-	if (vec == NULL) {
-		return;
-	}
-	if (mincore((void *)start_page, npages * page, (char *)vec) != 0) {
-		free(vec);
+	if (g_log_fd < 0 || buf == NULL || len == 0) {
 		return;
 	}
 	char line[128];
 	int n = snprintf(line, sizeof(line), "MSG2 %s @ %p len=%zu\n",
 	    tag, buf, len);
 	write(g_log_fd, line, (size_t)n);
+	unsigned char scratch[16];
 	for (size_t i = 0; i < len; i += 16) {
 		size_t chunk = len - i < 16 ? len - i : 16;
-		uintptr_t offpage = (base + i) & ~(page - 1);
-		if ((vec[(offpage - start_page) / page] & MINCORE_INCORE) == 0) {
-			break; /* rest is unmapped; stop */
+		mach_vm_size_t sz = chunk;
+		kern_return_t kr = mach_vm_read_overwrite(mach_task_self(),
+		    (mach_vm_address_t)((uintptr_t)buf + i), chunk,
+		    (vm_offset_t)(uintptr_t)scratch, &sz);
+		if (kr != KERN_SUCCESS || sz != chunk) {
+			break; /* rest is unmapped/protected; stop */
 		}
 		n = snprintf(line, sizeof(line), "%08zx ", i);
 		write(g_log_fd, line, (size_t)n);
 		for (size_t j = 0; j < chunk; j++) {
-			n = snprintf(line, sizeof(line), "%02x ",
-			    ((const unsigned char *)buf)[i + j]);
+			n = snprintf(line, sizeof(line), "%02x ", scratch[j]);
 			write(g_log_fd, line, (size_t)n);
 		}
 		write(g_log_fd, "\n", 1);
 	}
-	free(vec);
+}
+
+/* One-hop pointer chase: scan a captured region for heap-looking pointers,
+ * and where the target carries a wire-message signature, dump it. This is
+ * the bounded follow-up to the bounce-level capture: the serialized XPC
+ * dictionaries sit behind the OOL buffer-chain mirrors at +/- one pointer
+ * hop (signature: mach_msg header bits 0x00001315 0x13..., or the "CPX@"
+ * serialized-dict magic 0x40585043). */
+static bool ptr_in_heap_range(uint64_t v)
+{
+	return (v >= 0x100000000ull && v < 0x300000000ull) ||
+	    (v >= 0x10000000000ull && v < 0x20000000000ull);
+}
+
+static bool wire_sig_at(const void *p)
+{
+	const unsigned char *b = p;
+	uint32_t d0 = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+	    ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+	switch (d0) {
+	case 0x00131513: /* MACH_MSGH_BITS(REMOTE|VOUCHER|LOCAL), no complex */
+	case 0x80131513: /* complex: OOL descriptors follow the header */
+	case 0x00131593:
+	case 0x80131593:
+	case 0x0013150f:
+	case 0x8013150f:
+	case 0x40585043: /* "CPX@" serialized xpc dict */
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void chase_region(const void *base, size_t len)
+{
+	if (g_log_fd < 0 || base == NULL) {
+		return;
+	}
+	uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+	size_t n64 = len / 8;
+	static const void *seen[16];
+	static unsigned seen_cnt;
+	char line[128];
+	int n;
+
+	for (size_t i = 0; i < n64; i++) {
+		uintptr_t p0;
+		memcpy(&p0, (const char *)base + i * 8, sizeof(p0));
+		if (!ptr_in_heap_range((uint64_t)p0)) {
+			continue;
+		}
+		bool dup = false;
+		for (unsigned s = 0; s < seen_cnt; s++) {
+			if (seen[s] == (const void *)p0) {
+				dup = true;
+				break;
+			}
+		}
+		if (dup || seen_cnt >= 16) {
+			continue;
+		}
+		unsigned char probe[16];
+		if (safe_read((const void *)p0, probe, sizeof(probe)) != 0) {
+			continue; /* unmapped or protected; skip */
+		}
+		if (!wire_sig_at(probe)) {
+			continue;
+		}
+		seen[seen_cnt++] = (const void *)p0;
+		n = snprintf(line, sizeof(line), "MSG2 CHASE @ %p\n",
+		    (const void *)p0);
+		write(g_log_fd, line, (size_t)n);
+		emit_guarded((const void *)p0, 512, "CHASEB");
+	}
 }
 
 static void log_msg2(const char *tag, void *data, uint64_t option64,
@@ -534,10 +614,13 @@ static void log_msg2(const char *tag, void *data, uint64_t option64,
 		memcpy(&p2, (const char *)data + 0x30, sizeof(p2));
 		if (p1 != 0) {
 			emit_guarded((const void *)(uintptr_t)p1, 1024, "OOL1");
+			chase_region((const void *)(uintptr_t)p1, 1024);
 		}
 		if (p2 != 0 && p2 != p1) {
 			emit_guarded((const void *)(uintptr_t)p2, 1024, "OOL2");
+			chase_region((const void *)(uintptr_t)p2, 1024);
 		}
+		chase_region(data, 64);
 	}
 }
 
