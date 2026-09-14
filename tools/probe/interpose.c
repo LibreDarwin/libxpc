@@ -82,6 +82,9 @@
 #include <mach-o/nlist.h>
 #include <mach-o/fat.h>
 #include <libkern/OSByteOrder.h>
+#include <sys/sysctl.h>
+
+#include "../wiredecode/wirefmt.h"
 
 #define LOG_FD 3
 
@@ -531,6 +534,44 @@ static bool wire_sig_at(const void *p)
 	}
 }
 
+/* Chase-target dump: if the target starts with a "CPX@" envelope, render
+ * the serialized dictionary as a typed tree (via the shared wirefmt
+ * decoder) straight into the capture log; otherwise fall back to the
+ * packed hex dump. Reads are kernel copies, so a partially-unmapped tail
+ * degrades to a partial tree instead of a process fault. */
+static void wire_dump_or_hex(const void *p0, size_t cap)
+{
+	unsigned char hdr[16];
+	if (safe_read(p0, hdr, sizeof(hdr)) == 0 &&
+	    memcmp(hdr, "CPX@", 4) == 0) {
+		uint32_t body_len;
+		memcpy(&body_len, hdr + 12, sizeof(body_len));
+		size_t total = 16 + body_len;
+		if (total >= cap) {
+			total = cap; /* partial capture: decode what we have */
+		}
+		unsigned char body[512];
+		if (total <= sizeof(body) &&
+		    safe_read(p0, body, total) == 0) {
+			char *txt = NULL;
+			size_t tsz = 0;
+			FILE *f = open_memstream(&txt, &tsz);
+			if (f != NULL) {
+				fprintf(f, "MSG2 CHASEB (decoded) @ %p "
+				    "len=%zu\n", p0, total);
+				wirefmt_parse(body, total, 0, 0, f);
+				fclose(f);
+				if (txt != NULL) {
+					write(g_log_fd, txt, tsz);
+					free(txt);
+					return;
+				}
+			}
+		}
+	}
+	emit_guarded(p0, cap, "CHASEB");
+}
+
 static void chase_region(const void *base, size_t len)
 {
 	if (g_log_fd < 0 || base == NULL) {
@@ -570,7 +611,7 @@ static void chase_region(const void *base, size_t len)
 		n = snprintf(line, sizeof(line), "MSG2 CHASE @ %p\n",
 		    (const void *)p0);
 		write(g_log_fd, line, (size_t)n);
-		emit_guarded((const void *)p0, 512, "CHASEB");
+		wire_dump_or_hex((const void *)p0, 512);
 	}
 }
 
