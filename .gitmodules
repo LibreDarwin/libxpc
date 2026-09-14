@@ -10,3 +10,6 @@
 [submodule "src/apple/libdispatch"]
 	path = src/apple/libdispatch
 	url = https://github.com/apple-oss-distributions/libdispatch.git
+[submodule "src/apple/libsystem"]
+	path = src/apple/libsystem
+	url = https://github.com/apple-oss-distributions/Libsystem
