@@ -22,6 +22,17 @@ All intermediate objects and test executables are written below `build/`.
 The component builds `build/release/libsystem_xpc.dylib`; the re-export
 umbrella is assembled at `build/release/XPC.framework/`.
 
+`libsystem_xpc.dylib` also carries liblaunch: launchd-842's `liblaunch.c`,
+`libvproc.c` and `libbootstrap.c` with their `job` and `helper` MIG stubs,
+the `launch_*`, `vproc_*` and `bootstrap_*` API that modern Darwin ships
+inside libxpc. They build from the patched launchd copy with Apple's own
+flags, not our `-Werror`. Their private headers come from xcode-tools'
+internal SDK, searched after the public SDK; the build finds a built
+xcode-tools beside this tree (`../xcode-tools`, or
+`../../Developer/xcode-tools` inside LibreDarwin), or takes
+`INTERNAL_SDK=<path>`. `include/` holds the one SPI declaration no SDK
+carries, libquarantine's `qtn_proc_to_data`.
+
 The library links its `/usr/lib/system` siblings directly — the same
 `LIBRARY_SEARCH_PATHS = $(SDKROOT)/usr/lib/system` line Apple's
 Libsystem.xcconfig uses, resolving the libsystem_info / libsystem_notify /

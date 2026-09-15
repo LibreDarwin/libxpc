@@ -18,6 +18,10 @@ OBJDIR	 ?= ${BUILD}/obj
 RELEASE	 ?= ${BUILD}/release
 DYLIB	 := ${RELEASE}/libsystem_xpc.dylib
 
+# Objects built outside this component and linked into it: the root
+# Makefile passes liblaunch's.
+EXTRA_OBJS ?=
+
 SDKROOT!=	xcrun --show-sdk-path 2>/dev/null || true
 INCLUDES := -I${.CURDIR}/include -I${SDKROOT}/usr/include
 DEFINES := -DMACOSX -DDARWIN64 -DDARWIN -DBUILD_DARWIN
@@ -28,7 +32,8 @@ LDFLAGS	:= -dynamiclib -install_name @rpath/libsystem_xpc.dylib \
 
 # Apple's link graph for libsystem_xpc: the siblings that still exist as
 # separate /usr/lib/system install names on this SDK generation.
-LIB_SYSTEM_LIBS := -lsystem_info -lsystem_notify -lsystem_trace
+# libquarantine is liblaunch's, as in Apple's liblaunch.xcconfig.
+LIB_SYSTEM_LIBS := -lsystem_info -lsystem_notify -lsystem_trace -lquarantine
 
 LIB_SRCS!=	find ${.CURDIR}/object ${.CURDIR}/wire ${.CURDIR}/pipe \
 		${.CURDIR}/connection -name '*.c' | sort
@@ -51,8 +56,8 @@ ${OBJDIR}/${_s:T:R}.o: ${_s}
 	${CC} ${CFLAGS} -c ${_s} -o ${.TARGET}
 .endfor
 
-${DYLIB}: ${OBJS} ${RELEASE}
-	${CC} ${LDFLAGS} -o $@ ${OBJS} ${LIB_SYSTEM_LIBS}
+${DYLIB}: ${OBJS} ${EXTRA_OBJS} ${RELEASE}
+	${CC} ${LDFLAGS} -o $@ ${OBJS} ${EXTRA_OBJS} ${LIB_SYSTEM_LIBS}
 
 # Habitat install: /usr/lib/system/libsystem_xpc.dylib with Apple's
 # install name, plus headers.  DESTDIR for staged/OS builds.

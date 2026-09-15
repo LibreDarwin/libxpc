@@ -8,6 +8,7 @@
 #   src/XPC.framework/  re-export umbrella project (Modules + Resources)
 #   src/apple/       pristine apple-oss submodules (reference sources only)
 #   mk/patches/      numbered patch series applied to copies of src/apple/*
+#   include/         SPI declarations no SDK ships, for the Apple sources
 
 CC	?= clang
 RM	= rm -rf
@@ -31,18 +32,74 @@ CFLAGS	:= -std=c11 -fblocks -g -O0 -Wall -Wextra -Werror \
 # submodule into build/launchd-src and applies mk/patches/launchd/*.patch
 # in order to the copy, the way xcode-tools does it: a numbered patch
 # series per component, applied with `patch -p1 --forward`.
+LAUNCHD_SRC	:= ${BUILD}/launchd-src
+LAUNCHD_GEN	:= ${BUILD}/gen/launchd
 LAUNCHD_PATCHES!=	ls ${.CURDIR}/mk/patches/launchd/*.patch 2>/dev/null || true
 
-build/launchd-src/.patched: ${LAUNCHD_PATCHES}
-	@mkdir -p build/launchd-src
-	@rsync -a --delete --exclude .git src/apple/launchd/ build/launchd-src/
+${LAUNCHD_SRC}/.patched: ${LAUNCHD_PATCHES}
+	@mkdir -p ${LAUNCHD_SRC}
+	@rsync -a --delete --exclude .git src/apple/launchd/ ${LAUNCHD_SRC}/
 	@for p in ${LAUNCHD_PATCHES}; do \
 	    ${ECHO} "  apply $${p}"; \
-	    (cd build/launchd-src && patch -s -p1 --forward < "$$p") || exit 1; \
+	    (cd ${LAUNCHD_SRC} && patch -s -p1 --forward < "$$p") || exit 1; \
 	done
 	@touch $@
 
-patch-apple: build/launchd-src/.patched
+patch-apple: ${LAUNCHD_SRC}/.patched
+
+# liblaunch: launchd's liblaunch, libvproc and libbootstrap, built from the
+# patched copy into libsystem_xpc -- on modern Darwin the launch_*, vproc_*
+# and bootstrap_* API lives in libxpc.  They are Apple's sources, so they
+# build with Apple's flags (liblaunch.xcconfig) rather than our -Werror.
+#
+# Their private headers come from xcode-tools' internal SDK, searched after
+# the public SDK so it only fills gaps; include/ comes first, for the SPI no
+# SDK carries.  A built xcode-tools is found beside this tree, or inside
+# LibreDarwin; INTERNAL_SDK=<path> names another.
+.if !defined(INTERNAL_SDK)
+.for _xct in ${.CURDIR}/../xcode-tools ${.CURDIR}/../../Developer/xcode-tools
+_isdk:=	${_xct}/build/release/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.Internal.sdk
+.if !defined(INTERNAL_SDK) && exists(${_isdk}/usr/include)
+INTERNAL_SDK:=	${_isdk}
+.endif
+.endfor
+.endif
+
+LIBLAUNCH_SRCS	:= ${LAUNCHD_SRC}/liblaunch/liblaunch.c \
+		   ${LAUNCHD_SRC}/liblaunch/libvproc.c \
+		   ${LAUNCHD_SRC}/liblaunch/libbootstrap.c \
+		   ${LAUNCHD_GEN}/jobUser.c \
+		   ${LAUNCHD_GEN}/helperUser.c \
+		   ${LAUNCHD_GEN}/helperServer.c
+LIBLAUNCH_OBJS	:= ${LIBLAUNCH_SRCS:T:R:S,^,${OBJDIR}/liblaunch/,:S,$,.o,}
+LIBLAUNCH_CFLAGS:= -isysroot ${SDK_PATH} -fblocks -g -O0 -fvisibility=hidden \
+		   -I${LAUNCHD_GEN} -I${.CURDIR}/include \
+		   -I${LAUNCHD_SRC}/src -I${LAUNCHD_SRC}/liblaunch \
+		   -idirafter ${INTERNAL_SDK}/usr/include \
+		   -idirafter ${INTERNAL_SDK}/usr/local/include \
+		   -D__MigTypeCheck=1 -Dmig_external=__private_extern__ \
+		   -D_DARWIN_USE_64_BIT_INODE=1 -D__DARWIN_NON_CANCELABLE=1 \
+		   -DXPC_BUILDING_LAUNCHD=1
+
+${LAUNCHD_GEN}/.mig: ${LAUNCHD_SRC}/.patched
+	@test -d "${INTERNAL_SDK}/usr/include" || { \
+	    ${ECHO} "liblaunch: no internal SDK -- build xcode-tools, or pass INTERNAL_SDK=<path>"; \
+	    exit 1; }
+	@mkdir -p ${LAUNCHD_GEN}
+.for _d in job helper
+	cd ${LAUNCHD_GEN} && mig -isysroot ${SDK_PATH} -DXPC_BUILDING_LAUNCHD=1 \
+	    -I${LAUNCHD_SRC}/src -I${LAUNCHD_SRC}/liblaunch \
+	    -user ${_d}User.c -header ${_d}.h \
+	    -server ${_d}Server.c -sheader ${_d}Server.h \
+	    ${LAUNCHD_SRC}/src/${_d}.defs
+.endfor
+	@touch $@
+
+.for _s in ${LIBLAUNCH_SRCS}
+${OBJDIR}/liblaunch/${_s:T:R}.o: ${LAUNCHD_GEN}/.mig
+	@mkdir -p ${.TARGET:H}
+	${CC} ${LIBLAUNCH_CFLAGS} -c ${_s} -o ${.TARGET}
+.endfor
 
 .PHONY: all libxpc launchctl launchd test release patch-apple clean ${LIBS}
 
@@ -56,8 +113,9 @@ launchd: ${LAUNCHD}
 
 # The component Makefile owns the object dependency graph (including its
 # .d files), so the root always delegates; the sub-make decides freshness.
-${LIBS}:
-	${.MAKE} -C src/libsystem/xpc RELEASE=${RELEASE} OBJDIR=${OBJDIR}
+${LIBS}: ${LIBLAUNCH_OBJS}
+	${.MAKE} -C src/libsystem/xpc RELEASE=${RELEASE} OBJDIR=${OBJDIR} \
+	    EXTRA_OBJS="${LIBLAUNCH_OBJS}"
 
 ${RELEASE}:
 	@mkdir -p $@
