@@ -1,0 +1,36 @@
+Subject: [PATCH] launchd: patch out the XPC domain MIG subsystem
+
+domain.defs shipped only in the 10.9 internal SDK.  Until it is
+reconstructed, launchd does not size for or dispatch to xpc_domain_server;
+core.c's xpc_domain_* routines stay, unreached.
+---
+b2 -> a_tmp
+b3 -> b_tmp
+a_tmp -> a
+b_tmp -> b
+diff -ruN a/src/runtime.c b/src/runtime.c
+--- a/src/runtime.c	2026-09-16 12:39:36
++++ b/src/runtime.c	2026-09-16 12:39:36
+@@ -166,8 +166,7 @@
+ };
+ 
+ union xpc_domain_max_sz {
+-	union __RequestUnion__xpc_domain_xpc_domain_subsystem req;
+-	union __ReplyUnion__xpc_domain_xpc_domain_subsystem rep;
++	char unused;
+ };
+ 
+ union mach_exc_max_sz {
+@@ -1008,7 +1007,7 @@
+ 			result = notify_server(request, reply);
+ 		} else if (the_demux == job_server) {
+ 			launchd_syslog(LOG_DEBUG, "Trying domain subsystem...");
+-			result = xpc_domain_server(request, reply);
++			result = false;
+ 		} else {
+ 			launchd_syslog(LOG_ERR, "Cannot handle MIG request with ID: 0x%x", request->msgh_id);
+ 		}
+a -> a_tmp
+b -> b_tmp
+a_tmp -> b2
+b_tmp -> b3

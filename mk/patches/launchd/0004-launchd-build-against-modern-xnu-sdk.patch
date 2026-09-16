@@ -1,0 +1,100 @@
+Subject: [PATCH] launchd: build against a modern xnu and SDK
+
+- proc_bsdinfowithuniqid and PROC_PIDUNIQIDENTIFIERINFO moved to
+  sys/proc_info_private.h; fileport_makeport/makefd are in
+  System/sys/fileport.h, which core.c never included.
+- arm64 thread state for the crash exception port.
+- job_assumes() on a bit-field: os_assumes takes __typeof__ of its
+  argument, which clang rejects for bit-fields.
+- TASK_SEATBELT_PORT is gone from xnu; it is Sandbox's, so it follows
+  HAVE_SANDBOX.
+- xpc_pipe_try_receive() now takes the port set by address.
+---
+b1 -> a_tmp
+b2 -> b_tmp
+a_tmp -> a
+b_tmp -> b
+diff -ruN a/src/core.c b/src/core.c
+--- a/src/core.c	2026-09-16 12:39:36
++++ b/src/core.c	2026-09-16 12:39:36
+@@ -90,6 +90,8 @@
+ #include <libproc.h>
+ #include <libproc_internal.h>
+ #include <System/sys/proc_info.h>
++#include <sys/proc_info_private.h>
++#include <System/sys/fileport.h>
+ #include <malloc/malloc.h>
+ #include <pthread.h>
+ #if HAVE_SANDBOX
+@@ -6448,6 +6450,8 @@
+ 	f = PPC_THREAD_STATE64;
+ #elif defined(__i386__) || defined(__x86_64__)
+ 	f = x86_THREAD_STATE;
++#elif defined(__arm64__)
++	f = ARM_THREAD_STATE64;
+ #elif defined(__arm__)
+ 	f = ARM_THREAD_STATE;
+ #else
+@@ -8093,7 +8097,7 @@
+ 		return BOOTSTRAP_NO_MEMORY;
+ 	}
+ 
+-	if (!job_assumes(j, j->per_user)) {
++	if (!job_assumes(j, j->per_user != 0)) {
+ 		return BOOTSTRAP_NOT_PRIVILEGED;
+ 	}
+ 
+@@ -8396,7 +8400,7 @@
+ 		/* No-op. */
+ 		break;
+ 	case VPROC_GSK_WEIRD_BOOTSTRAP:
+-		if (job_assumes(j, j->weird_bootstrap)) {
++		if (job_assumes(j, j->weird_bootstrap != 0)) {
+ 			job_log(j, LOG_DEBUG, "Unsetting weird bootstrap.");
+ 
+ 			mach_msg_size_t mxmsgsz = (typeof(mxmsgsz)) sizeof(union __RequestUnion__job_mig_job_subsystem);
+@@ -8515,9 +8519,11 @@
+ 
+ 				desired_log_level = LOG_WARNING;
+ 
++#if HAVE_SANDBOX
+ 				if (ms->special_port_num == TASK_SEATBELT_PORT) {
+ 					desired_log_level = LOG_DEBUG;
+ 				}
++#endif
+ 			}
+ 
+ 			job_log(j, desired_log_level, "Could not setup Mach task special port %u: %s", ms->special_port_num, mach_error_string(errno));
+@@ -8555,7 +8561,7 @@
+ 	size_t cnt = 0;
+ 	struct machservice *msi = NULL;
+ 	SLIST_FOREACH(msi, &j->machservices, sle) {
+-		if (msi->upfront && job_assumes(j, msi->recv)) {
++		if (msi->upfront && job_assumes(j, msi->recv != 0)) {
+ 			cnt++;
+ 		}
+ 	}
+diff -ruN a/src/runtime.c b/src/runtime.c
+--- a/src/runtime.c	2026-09-16 12:39:36
++++ b/src/runtime.c	2026-09-16 12:39:36
+@@ -39,6 +39,7 @@
+ #include <sys/time.h>
+ #include <sys/proc.h>
+ #include <sys/proc_info.h>
++#include <sys/proc_info_private.h>
+ #include <libproc.h>
+ #include <sys/event.h>
+ #include <sys/queue.h>
+@@ -1026,7 +1027,7 @@
+ 
+ 		mach_port_t recvp = MACH_PORT_NULL;
+ 		xpc_object_t request = NULL;
+-		int result = xpc_pipe_try_receive(ipc_port_set, &request, &recvp, launchd_mig_demux, msg_size, 0);
++		int result = xpc_pipe_try_receive(&ipc_port_set, &request, &recvp, launchd_mig_demux, msg_size, 0);
+ 		if (result == 0 && request) {
+ 			boolean_t handled = false;
+ 			time_of_mach_msg_return = runtime_get_opaque_time();
+a -> a_tmp
+b -> b_tmp
+a_tmp -> b1
+b_tmp -> b2

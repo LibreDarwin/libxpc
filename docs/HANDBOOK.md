@@ -30,8 +30,32 @@ flags, not our `-Werror`. Their private headers come from xcode-tools'
 internal SDK, searched after the public SDK; the build finds a built
 xcode-tools beside this tree (`../xcode-tools`, or
 `../../Developer/xcode-tools` inside LibreDarwin), or takes
-`INTERNAL_SDK=<path>`. `include/` holds the one SPI declaration no SDK
-carries, libquarantine's `qtn_proc_to_data`.
+`INTERNAL_SDK=<path>`.
+
+`build/release/launchd` is Apple's launchd-842 itself, built from the same
+patched copy with the same flags and linked against `libsystem_xpc`;
+`launchd_stub` stays as the test double `bmake test` drives. Patches 0003
+to 0005 in `mk/patches/launchd/` turn off quarantine, Sandbox and libauditd
+(LibreDarwin's kernel has no such policy), fit launchd to a modern xnu and
+SDK, and patch out the XPC domain subsystem, whose `domain.defs` Apple
+never published. `include/` holds what no SDK carries for these sources:
+`xpc/launchd.h` -- the routine keys, operations and jetsam bands launchd
+serves, a contract our libxpc's client side shares -- and the SPI
+availability macros. `src/launchd/xpc_launchd.c` is the libxpc SPI only
+launchd calls, built into it: `ld2xpc` and `xpc_call_wakeup`.
+
+launchd still calls libxpc SPI that `libsystem_xpc` does not export yet.
+Linked on a Mac these bind to the host's libSystem; on LibreDarwin they
+must come from here:
+
+    xpc_pipe_try_receive  xpc_pipe_routine_reply
+    xpc_dictionary_create_reply  xpc_dictionary_copy_mach_send
+    xpc_dictionary_set_mach_recv  xpc_array_set_string
+    xpc_array_set_uint64  xpc_copy_entitlement_for_token
+    xpc_copy_entitlements_for_pid  xpc_fd_create  _xpc_bool_true
+
+`nm -u build/release/launchd` against `nm -gU
+build/release/libsystem_xpc.dylib` shows what is left.
 
 The library links its `/usr/lib/system` siblings directly — the same
 `LIBRARY_SEARCH_PATHS = $(SDKROOT)/usr/lib/system` line Apple's

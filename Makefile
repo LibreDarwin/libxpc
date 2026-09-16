@@ -81,17 +81,24 @@ LIBLAUNCH_CFLAGS:= -isysroot ${SDK_PATH} -fblocks -g -O0 -fvisibility=hidden \
 		   -D_DARWIN_USE_64_BIT_INODE=1 -D__DARWIN_NON_CANCELABLE=1 \
 		   -DXPC_BUILDING_LAUNCHD=1
 
+# Every MIG interface liblaunch and launchd use: launchd's own, and the
+# SDK's mach_exc and notify, whose servers launchd runs.
+LAUNCHD_DEFS	:= ${LAUNCHD_SRC}/src/job.defs ${LAUNCHD_SRC}/src/job_reply.defs \
+		   ${LAUNCHD_SRC}/src/job_forward.defs \
+		   ${LAUNCHD_SRC}/src/internal.defs ${LAUNCHD_SRC}/src/helper.defs \
+		   ${SDK_PATH}/usr/include/mach/mach_exc.defs \
+		   ${SDK_PATH}/usr/include/mach/notify.defs
+
 ${LAUNCHD_GEN}/.mig: ${LAUNCHD_SRC}/.patched
 	@test -d "${INTERNAL_SDK}/usr/include" || { \
 	    ${ECHO} "liblaunch: no internal SDK -- build xcode-tools, or pass INTERNAL_SDK=<path>"; \
 	    exit 1; }
 	@mkdir -p ${LAUNCHD_GEN}
-.for _d in job helper
+.for _d in ${LAUNCHD_DEFS}
 	cd ${LAUNCHD_GEN} && mig -isysroot ${SDK_PATH} -DXPC_BUILDING_LAUNCHD=1 \
 	    -I${LAUNCHD_SRC}/src -I${LAUNCHD_SRC}/liblaunch \
-	    -user ${_d}User.c -header ${_d}.h \
-	    -server ${_d}Server.c -sheader ${_d}Server.h \
-	    ${LAUNCHD_SRC}/src/${_d}.defs
+	    -user ${_d:T:R}User.c -header ${_d:T:R}.h \
+	    -server ${_d:T:R}Server.c -sheader ${_d:T:R}Server.h ${_d}
 .endfor
 	@touch $@
 
@@ -101,6 +108,35 @@ ${OBJDIR}/liblaunch/${_s:T:R}.o: ${LAUNCHD_GEN}/.mig
 	${CC} ${LIBLAUNCH_CFLAGS} -c ${_s} -o ${.TARGET}
 .endfor
 
+# launchd: Apple's launchd-842 from the patched copy, the MIG stubs it
+# serves and calls, and the libxpc SPI only it uses (src/launchd/
+# xpc_launchd.c), linked against libsystem_xpc.  Same
+# flags as liblaunch, plus Libinfo's private libinfo.h.
+LAUNCHD_REAL	:= ${RELEASE}/launchd
+LAUNCHD_SRCS	:= ${LAUNCHD_SRC}/src/core.c ${LAUNCHD_SRC}/src/ipc.c \
+		   ${LAUNCHD_SRC}/src/kill2.c ${LAUNCHD_SRC}/src/ktrace.c \
+		   ${LAUNCHD_SRC}/src/launchd.c ${LAUNCHD_SRC}/src/log.c \
+		   ${LAUNCHD_SRC}/src/runtime.c \
+		   ${.CURDIR}/src/launchd/xpc_launchd.c \
+		   ${LAUNCHD_GEN}/jobServer.c ${LAUNCHD_GEN}/jobUser.c \
+		   ${LAUNCHD_GEN}/job_replyUser.c ${LAUNCHD_GEN}/job_forwardUser.c \
+		   ${LAUNCHD_GEN}/internalServer.c ${LAUNCHD_GEN}/internalUser.c \
+		   ${LAUNCHD_GEN}/helperUser.c \
+		   ${LAUNCHD_GEN}/mach_excServer.c ${LAUNCHD_GEN}/notifyServer.c
+LAUNCHD_OBJS	:= ${LAUNCHD_SRCS:T:R:S,^,${OBJDIR}/launchd/,:S,$,.o,}
+LAUNCHD_CFLAGS	:= ${LIBLAUNCH_CFLAGS} \
+		   -idirafter ${.CURDIR}/src/apple/libinfo/lookup.subproj
+
+.for _s in ${LAUNCHD_SRCS}
+${OBJDIR}/launchd/${_s:T:R}.o: ${LAUNCHD_GEN}/.mig
+	@mkdir -p ${.TARGET:H}
+	${CC} ${LAUNCHD_CFLAGS} -c ${_s} -o ${.TARGET}
+.endfor
+
+${LAUNCHD_REAL}: ${LAUNCHD_OBJS} ${LIBS}
+	${CC} -isysroot ${SDK_PATH} ${LAUNCHD_OBJS} -L${RELEASE} -lsystem_xpc \
+	    -lbsm -Wl,-rpath,${RELEASE} -o $@
+
 .PHONY: all libxpc launchctl launchd test release patch-apple clean ${LIBS}
 
 all: libxpc launchctl launchd release
@@ -109,7 +145,7 @@ libxpc: ${LIBS}
 
 launchctl: ${LAUNCHCTL}
 
-launchd: ${LAUNCHD}
+launchd: ${LAUNCHD} ${LAUNCHD_REAL}
 
 # The component Makefile owns the object dependency graph (including its
 # .d files), so the root always delegates; the sub-make decides freshness.

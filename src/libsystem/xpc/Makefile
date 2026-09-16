@@ -32,8 +32,7 @@ LDFLAGS	:= -dynamiclib -install_name @rpath/libsystem_xpc.dylib \
 
 # Apple's link graph for libsystem_xpc: the siblings that still exist as
 # separate /usr/lib/system install names on this SDK generation.
-# libquarantine is liblaunch's, as in Apple's liblaunch.xcconfig.
-LIB_SYSTEM_LIBS := -lsystem_info -lsystem_notify -lsystem_trace -lquarantine
+LIB_SYSTEM_LIBS := -lsystem_info -lsystem_notify -lsystem_trace
 
 LIB_SRCS!=	find ${.CURDIR}/object ${.CURDIR}/wire ${.CURDIR}/pipe \
 		${.CURDIR}/connection -name '*.c' | sort

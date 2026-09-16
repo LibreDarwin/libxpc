@@ -1,0 +1,52 @@
+Subject: [PATCH] launchd: build without quarantine, Sandbox or libauditd
+
+LibreDarwin's kernel carries no quarantine or Sandbox MAC policy, so
+HAVE_QUARANTINE and HAVE_SANDBOX are off.  HAVE_LIBAUDITD follows
+<bsm/auditd_lib.h> the way the other knobs follow their headers.
+---
+a0 -> a_tmp
+b1 -> b_tmp
+a_tmp -> a
+b_tmp -> b
+diff -ruN a/src/config.h b/src/config.h
+--- a/src/config.h	2026-09-16 12:39:36
++++ b/src/config.h	2026-09-16 12:39:36
+@@ -1,32 +1,17 @@
+ #ifndef __CONFIG_H__
+ #define __CONFIG_H__
+-
+ #include <TargetConditionals.h>
+-
+-#if __has_include(<quarantine.h>)
+-#define HAVE_QUARANTINE 1
+-#else
+ #define HAVE_QUARANTINE 0
+-#endif
+-
+ #if __has_include(<responsibility.h>)
+ #define HAVE_RESPONSIBILITY 1
+ #else
+ #define HAVE_RESPONSIBILITY 0
+ #endif
+-
+-#if __has_include(<sandbox.h>)
+-#define HAVE_SANDBOX 1
+-#else
+ #define HAVE_SANDBOX 0
+-#endif
+-
+-#define HAVE_LIBAUDITD !TARGET_OS_EMBEDDED
+-
++#define HAVE_LIBAUDITD (!TARGET_OS_EMBEDDED && __has_include(<bsm/auditd_lib.h>))
+ #if !TARGET_OS_EMBEDDED && __has_include(<systemstats/systemstats.h>)
+ #define HAVE_SYSTEMSTATS 1
+ #else
+ #define HAVE_SYSTEMSTATS 0
+ #endif
+-
+-#endif /* __CONFIG_H__ */
++#endif
+a -> a_tmp
+b -> b_tmp
+a_tmp -> a0
+b_tmp -> b1
