@@ -84,6 +84,7 @@ typedef enum xpc_kind {
     XPC_KIND_ACTIVITY,
     XPC_KIND_SESSION,
     XPC_KIND_LISTENER,
+    XPC_KIND_RICH_ERROR,
     XPC_KIND_COUNT,
 } xpc_kind_t;
 
